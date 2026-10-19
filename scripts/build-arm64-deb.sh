@@ -20,9 +20,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 ARCH="$(uname -m)"
-if [ "$ARCH" != "aarch64" ]; then
+if [ "$ARCH" != "aarch64" ] && [ "${ALLOW_EMULATED:-0}" != "1" ]; then
     echo "✗ 需要原生 arm64 构建机（当前 $ARCH）。arm64 deb 必须在 aarch64 上编译。" >&2
+    echo "  在 qemu-user 模拟的 arm64 rootfs 内运行时，设 ALLOW_EMULATED=1 跳过此检查。" >&2
     exit 2
+fi
+if [ "${ALLOW_EMULATED:-0}" = "1" ]; then
+    echo "⚠ 模拟构建模式（${ARCH} 内核 + arm64 userland）"
 fi
 
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' app/Cargo.toml | head -1)"
@@ -44,14 +48,37 @@ if [ -n "$missing" ]; then
 fi
 pkg-config --exists webkit2gtk-4.1 || { echo "✗ webkit2gtk-4.1 不可用" >&2; exit 2; }
 command -v cargo >/dev/null || { echo "✗ 未安装 Rust" >&2; exit 2; }
-command -v node >/dev/null || { echo "✗ 未安装 Node" >&2; exit 2; }
+if [ "${SKIP_UI:-0}" != "1" ]; then
+    command -v node >/dev/null || { echo "✗ 未安装 Node" >&2; exit 2; }
+fi
 
-echo "== [1/6] 获取第三方二进制（PDFium arm64 + OCR 模型）=="
+echo "== [1/6] 获取第三方二进制（PDFium arm64 + OCR 模型 + ONNX Runtime）=="
 if [ "${SKIP_BIN:-0}" = "1" ]; then
     echo "   跳过（SKIP_BIN=1）"
 else
     bash scripts/fetch-binaries.sh --platform linux
 fi
+
+# ONNX Runtime 必须是**动态库**：ocr-helper 走 ort 的 load-dynamic，
+# 不用 pyke 的静态库（那是 GCC 13+ 编的，Debian 12 链接会 undefined reference）
+ORT_TGZ_VER=1.22.0
+ORT_DIR="$ROOT/third_party/onnxruntime"
+if [ ! -f "$ORT_DIR/lib/libonnxruntime.so" ]; then
+    echo "   下载 ONNX Runtime ${ORT_TGZ_VER} (linux-aarch64)"
+    mkdir -p "$ORT_DIR"
+    tmp="$(mktemp -d)"
+    url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_TGZ_VER}/onnxruntime-linux-aarch64-${ORT_TGZ_VER}.tgz"
+    # GitHub 直连不稳，按顺序回退镜像
+    ok=0
+    for u in "$url" "https://ghfast.top/$url" "https://gh-proxy.com/$url"; do
+        if curl -fsSL --retry 2 --max-time 600 -o "$tmp/ort.tgz" "$u"; then ok=1; break; fi
+    done
+    [ "$ok" = "1" ] || { echo "✗ ONNX Runtime 下载失败" >&2; exit 2; }
+    tar xzf "$tmp/ort.tgz" -C "$tmp" --strip-components=1
+    install -m 0644 "$tmp/lib/libonnxruntime.so" "$ORT_DIR/lib/libonnxruntime.so"
+    rm -rf "$tmp"
+fi
+ls -lh "$ORT_DIR/lib/libonnxruntime.so"
 
 echo "== [2/6] 构建前端 =="
 if [ "${SKIP_UI:-0}" = "1" ]; then
@@ -64,9 +91,12 @@ fi
 
 echo "== [3/6] 构建主程序（release + custom-protocol）=="
 cargo build --release -p search-tool --features custom-protocol
+strip --strip-unneeded target/release/search-tool 2>/dev/null || true
 
-echo "== [4/6] 构建 ocr-helper（独立 workspace，rust 1.95）=="
-( cd ocr-helper && cargo build --release )
+echo "== [4/6] 构建 ocr-helper（独立 workspace）=="
+# copy-dylibs 需要构建期就知道 ORT 动态库位置
+( cd ocr-helper && ORT_DYLIB_PATH="$ORT_DIR/lib/libonnxruntime.so" cargo build --release )
+strip --strip-unneeded ocr-helper/target/release/ocr-helper 2>/dev/null || true
 
 echo "== [5/6] 组装 deb 目录树 =="
 STAGE="$ROOT/build/deb-root"
@@ -88,15 +118,9 @@ cp -f third_party/ocr-models/*.onnx third_party/ocr-models/*.txt "$PKG/lib/searc
 # PDFium
 install -m 0644 third_party/pdfium/lib/libpdfium.so "$PKG/lib/libpdfium.so"
 
-# ONNX Runtime 动态库（oar-ocr 构建期下载；找不到则跳过，静态链接时不需要）
-ORT_SO="$(find ocr-helper/target -name 'libonnxruntime.so*' -type f 2>/dev/null | head -1 || true)"
-if [ -n "$ORT_SO" ]; then
-    install -m 0644 "$ORT_SO" "$PKG/lib/libonnxruntime.so"
-    # 让 helper 在自身目录找 ORT，避免构建机绝对 RPATH 失效
-    patchelf --set-rpath '$ORIGIN' "$PKG/lib/ocr-helper" || true
-else
-    echo "   ⚠ 未找到 libonnxruntime.so（若静态链接可忽略）"
-fi
+# ONNX Runtime 动态库（load-dynamic 运行时 dlopen，路径由主程序注入 ORT_DYLIB_PATH）
+ORT_SO="$ORT_DIR/lib/libonnxruntime.so"
+install -m 0644 "$ORT_SO" "$PKG/lib/libonnxruntime.so"
 
 # 图标 + desktop
 install -m 0644 app/icons/128x128.png "$STAGE/usr/share/icons/hicolor/128x128/apps/search-tool.png"
@@ -121,7 +145,7 @@ Priority: optional
 Architecture: arm64
 Installed-Size: $SIZE_KB
 Maintainer: search-tool
-Depends: libwebkit2gtk-4.1-0, libgtk-3-0 | libgtk-3-0t64, libayatana-appindicator3-1, librsvg2-2
+Depends: libwebkit2gtk-4.1-0, libjavascriptcoregtk-4.1-0, libgtk-3-0 | libgtk-3-0t64, libsoup-3.0-0, libglib2.0-0, libcairo2, libpango-1.0-0, libgdk-pixbuf-2.0-0, libdbus-1-3, libstdc++6, libgcc-s1
 Description: everytxt 本地全文搜索引擎
  本地全文检索（tantivy + jieba），覆盖 Office/PDF/电子书/压缩包；
  内置 sjz（十进制.exe 标签容器）透明解密与离线 PP-OCRv6 模型。

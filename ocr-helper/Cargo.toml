@@ -14,12 +14,24 @@ path = "src/main.rs"
 
 [dependencies]
 # auto-download：首次使用时从 ModelScope 拉取注册模型到 $OAR_HOME（默认 ~/.oar）
-# download-binaries：构建期获取 ONNX Runtime 动态库
+#
+# 注意：**不要**启用 download-binaries。该特性获取的是 pyke 编译的 ORT 静态库
+# （libonnxruntime.a），而它用 GCC 13+ 构建，内部引用了 Debian 12 libstdc++
+# 没有的 __cxa_call_terminate / _M_replace_cold，以及 glibc 2.38 的 __isoc23_*，
+# 链接期必然 undefined reference。
+# 改用 load-dynamic：运行期 dlopen 官方 libonnxruntime.so（路径由 ORT_DYLIB_PATH
+# 指定，安装包内已随包附带），该 .so 只要求 glibc 2.27 / GLIBCXX 3.4.22，
+# 兼容性远好于静态库。
 oar-ocr = { version = "=0.9.1", default-features = false, features = [
     "auto-download",
     "simd",
-    "download-binaries",
 ] }
+
+ort = { version = "=2.0.0-rc.13", default-features = false, features = [
+    "std",
+    "load-dynamic",
+] }
+
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
