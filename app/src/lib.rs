@@ -34,6 +34,10 @@ pub fn run(open_dir: Option<String>) {
         // 7.9 / B6：检测更新（endpoints/pubkey 占位于 tauri.conf.json，首发版填真实值）
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
+            // 打包态资源定位（deb 随包分发 OCR helper / 模型 / ONNX Runtime / PDFium）。
+            // 必须在任何索引任务提交前完成：stcore 的 helper_path() 读环境变量。
+            #[cfg(target_os = "linux")]
+            bundle_resource_env(app);
             // 主窗口代码建窗（tauri.conf.json 的 app.windows 恒为空数组）：
             // wry 0.57 的 create_environment 只认 builder 传入的
             // additional_browser_args，**不读** WebView2 文档约定的
@@ -122,6 +126,39 @@ fn webview_browser_args() -> Option<String> {
     args.push(' ');
     args.push_str(&extra);
     Some(args)
+}
+
+/// 打包态（deb）资源定位：把随包资源注入环境变量。
+///
+/// 只补未设置的键，显式环境变量优先（便于排障/覆盖）。
+/// 资源布局（tauri.conf.json resources，resource_dir = /usr/lib/search-tool）：
+/// ```text
+/// lib/ocr-helper                  OCR helper 可执行
+/// lib/libonnxruntime.so           ONNX Runtime 动态库
+/// lib/libpdfium.so               PDFium
+/// lib/search-tool/models/*.onnx  PP-OCRv6 tiny 三件套
+/// ```
+#[cfg(target_os = "linux")]
+fn bundle_resource_env<R: tauri::Runtime>(app: &tauri::App<R>) {
+    use tauri::Manager;
+
+    let Ok(res) = app.path().resource_dir() else {
+        return;
+    };
+    let lib = res.join("lib");
+
+    let set_if_absent = |key: &str, path: &std::path::Path| {
+        if std::env::var_os(key).is_some() || !path.exists() {
+            return;
+        }
+        std::env::set_var(key, path);
+    };
+
+    set_if_absent("SEARCH_TOOL_OCR_HELPER", &lib.join("ocr-helper"));
+    set_if_absent("SEARCH_TOOL_OCR_MODEL_DIR", &lib.join("search-tool").join("models"));
+    set_if_absent("SEARCH_TOOL_PDFIUM_LIB", &lib.join("libpdfium.so"));
+    // ort（pyke）动态加载 ONNX Runtime 时读该变量；helper 子进程继承
+    set_if_absent("ORT_DYLIB_PATH", &lib.join("libonnxruntime.so"));
 }
 
 /// 测试用临时目录（scanner 迁入 stcore 后的 app 侧替身；原 `scanner::testutil`）

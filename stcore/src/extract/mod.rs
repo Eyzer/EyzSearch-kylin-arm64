@@ -36,6 +36,7 @@
 //! | epub | epub.rs |
 //! | mobi/azw3/fb2/lit/kfx/cbz | ebook.rs |
 //! | doc/xls/ppt/odt/ods/odp/rtf | legacy.rs（anydoc） |
+//! | 十进制.exe 标签容器（.SJZ，扩展名不变） | sjz.rs（透明解密后按原扩展名分发） |
 //! | png/jpg/... | ocr.rs（默认关） |
 //! | exe/dll/so/dylib/bin | binary.rs |
 //! | djvu | **缺口**：djvu-rs 可编译但无文本层抽取，类型表暂保留声明（见 R4 报告） |
@@ -56,6 +57,7 @@ pub mod ooxml;
 pub mod pdf;
 pub mod rar;
 pub mod sevenz;
+pub mod sjz;
 
 use std::io::Read;
 use std::path::Path;
@@ -284,6 +286,12 @@ pub fn extract_path(path: &Path) -> Result<ExtractResult, ExtractError> {
 /// `name` 仅用于取扩展名与回填条目名，内容一律取 `bytes`。
 pub fn extract_entry(name: &str, bytes: &[u8]) -> Result<ExtractedEntry, ExtractError> {
     let ext = extension_of(Path::new(name));
+    // sjz 标签容器：文档被 十进制.exe 加密后扩展名不变，按内容探测并就地解密
+    let unboxed = match sjz::probe(bytes) {
+        Some(n) => Some(sjz::decrypt(bytes, n)?),
+        None => None,
+    };
+    let bytes = unboxed.as_deref().unwrap_or(bytes);
     let text = match ext.as_str() {
         e if HTML_EXTS.contains(&e) => html::html_to_text(&decode_bytes(bytes).0),
         "eml" => eml::eml_to_text(bytes),
@@ -332,6 +340,12 @@ fn dispatch(
     bytes: &[u8],
     path: &Path,
 ) -> Result<ExtractResult, ExtractError> {
+    // sjz 标签容器：先解密再按原扩展名分发（扩展名不变，内容已还原）
+    let unboxed = match sjz::probe(bytes) {
+        Some(n) => Some(sjz::decrypt(bytes, n)?),
+        None => None,
+    };
+    let bytes = unboxed.as_deref().unwrap_or(bytes);
     let text = match ext {
         e if HTML_EXTS.contains(&e) => html::html_to_text(&decode_bytes(bytes).0),
         "eml" => eml::eml_to_text(bytes),

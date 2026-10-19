@@ -27,6 +27,11 @@ fn load_text(path: &str, state: &State<'_, AppState>) -> Result<(String, Option<
             .map_err(|e| e.to_string());
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    // sjz 标签容器：与索引链路同口径，预览前先解密
+    let bytes = match stcore::extract::sjz::probe(&bytes) {
+        Some(n) => stcore::extract::sjz::decrypt(&bytes, n).map_err(|e| e.to_string())?,
+        None => bytes,
+    };
     let (text, enc) = stcore::text::decode_bytes(&bytes);
     Ok((text, Some(enc.to_string())))
 }
@@ -180,7 +185,12 @@ pub fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
             stcore::extract::MAX_FILE_SIZE / 1024 / 1024
         ));
     }
-    std::fs::read(&path).map_err(|e| format!("读取文件失败: {e}"))
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取文件失败: {e}"))?;
+    // sjz 标签容器：Office 高保真视图读的是原始字节，先解密再交给前端解析
+    match stcore::extract::sjz::probe(&bytes) {
+        Some(n) => stcore::extract::sjz::decrypt(&bytes, n).map_err(|e| e.to_string()),
+        None => Ok(bytes),
+    }
 }
 
 /* -------------------- P3-B：PDF 页视图（渲染 + bbox） -------------------- */
