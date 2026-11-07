@@ -5,7 +5,7 @@
  * 用户审核过的定稿，改动前先确认。
  */
 
-export const HOMEPAGE = 'https://github.com/Eyzer'
+export const HOMEPAGE = 'https://github.com/Eyzer/EyzSearch-kylin-arm64'
 
 export const ABOUT = {
   title: '关于 EyzSearch 全文搜索',
