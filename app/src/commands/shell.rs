@@ -8,20 +8,19 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, State};
-use tauri_plugin_autostart::ManagerExt as _;
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri::{
+    AppHandle, CustomMenuItem, Manager, State, SystemTray, SystemTrayEvent, SystemTrayMenu,
+    SystemTrayMenuItem,
+};
 
 use crate::state::AppState;
 
 pub const APP_CONFIG_FILE: &str = "app.json";
 /// Unix socket 文件名（位于 index_dir 下）
-pub const SOCKET_FILE: &str = "search-tool.sock";
+pub const SOCKET_FILE: &str = "eyzsearch.sock";
 /// Windows TCP loopback 端口文件名（位于 index_dir 下；单实例 transport，见 `setup_single_instance_tcp`）
 #[cfg(windows)]
-pub const PORT_FILE: &str = "search-tool.port";
+pub const PORT_FILE: &str = "eyzsearch.port";
 
 /* ------------------------------- 配置类型 ------------------------------- */
 
@@ -89,6 +88,10 @@ pub struct AppConfig {
     /// 右击目录搜索（shell 集成）开关状态（P5）
     #[serde(default)]
     pub right_click_search: bool,
+    /// OCR 识别开关（图片 / 扫描型 PDF）。**默认关闭**：
+    /// 开启后索引与预览会对无文字层的扫描件走 OCR，代价是索引耗时显著增加。
+    #[serde(default)]
+    pub ocr_enabled: bool,
     #[serde(default = "default_hotkeys")]
     pub hotkeys: Vec<HotkeyBinding>,
 }
@@ -105,6 +108,7 @@ impl Default for AppConfig {
             autostart: false,
             close_to_tray: false,
             right_click_search: false,
+            ocr_enabled: false,
             hotkeys: default_hotkeys(),
         }
     }
@@ -142,7 +146,62 @@ pub fn get_app_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
 
 #[tauri::command]
 pub fn set_app_config(cfg: AppConfig, state: State<'_, AppState>) -> Result<(), String> {
-    cfg.save(&state.index_dir()).map_err(|e| e.to_string())
+    cfg.save(&state.index_dir()).map_err(|e| e.to_string())?;
+    // OCR 开关落到进程级标志：设置页改完立即生效（对下一次索引/预览起作用）
+    stcore::ocr::set_enabled(cfg.ocr_enabled);
+    Ok(())
+}
+
+/// 当前 OCR 是否真正可用（开关打开 + helper 二进制就位）
+///
+/// 设置页用它给出提示：开关开了但 helper 缺失时，应告知用户扫描件仍不会被识别。
+#[tauri::command]
+pub fn ocr_status() -> OcrStatus {
+    OcrStatus {
+        enabled: stcore::ocr::enabled(),
+        helper_ready: stcore::ocr::helper_path().is_some(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrStatus {
+    pub enabled: bool,
+    pub helper_ready: bool,
+}
+
+/// 用系统默认浏览器打开外部链接。
+///
+/// 前端 `window.open` 在 Tauri webview 里会被拦（表现为「点了没反应」），
+/// 故所有外链统一走这里。只放行 http/https，避免被当成任意命令执行。
+#[tauri::command]
+pub fn open_external(url: String) -> Result<(), String> {
+    let u = url.trim();
+    if !(u.starts_with("https://") || u.starts_with("http://")) {
+        return Err("仅支持 http/https 链接".into());
+    }
+    open::that(u).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    pub name: String,
+    pub version: String,
+}
+
+/// 应用名与版本（「关于」面板用）。
+///
+/// 版本优先取打包时注入的 `EYZ_VERSION`（deb 版本号，如 `0.2.3+kylin1`），
+/// 未注入时回退 Cargo 包版本，避免界面上显示与安装包不一致的号。
+#[tauri::command]
+pub fn app_info() -> AppInfo {
+    AppInfo {
+        name: "EyzSearch 全文搜索".to_string(),
+        version: option_env!("EYZ_VERSION")
+            .unwrap_or(env!("CARGO_PKG_VERSION"))
+            .to_string(),
+    }
 }
 
 #[tauri::command]
@@ -152,16 +211,37 @@ pub fn set_theme(theme: ThemeMode, state: State<'_, AppState>) -> Result<(), Str
     cfg.save(&state.index_dir()).map_err(|e| e.to_string())
 }
 
-/// 开机启动开关（三平台经 tauri-plugin-autostart）
+/// 开机启动开关。
+///
+/// Tauri 1 无 autostart 插件，直接按 freedesktop 规范写
+/// `~/.config/autostart/eyzsearch.desktop`（麒麟/Debian 桌面均生效）。
 #[tauri::command]
-pub fn set_autostart(
-    enabled: bool,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let al = app.autolaunch();
-    let r = if enabled { al.enable() } else { al.disable() };
-    r.map_err(|e| e.to_string())?;
+pub fn set_autostart(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
+    let home = std::env::var_os("HOME").ok_or("无法定位 HOME 目录")?;
+    let dir = PathBuf::from(home).join(".config").join("autostart");
+    let path = dir.join("eyzsearch.desktop");
+    // 旧版本留下的条目，一并清掉，避免「启动应用程序」里出现两个同名项
+    let legacy = dir.join("search-tool.desktop");
+
+    if enabled {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let body = "[Desktop Entry]\n\
+Type=Application\n\
+Name=EyzSearch 全文搜索\n\
+Comment=本地全文搜索引擎（开机自启）\n\
+Exec=/usr/bin/eyzsearch-launch\n\
+Icon=eyzsearch\n\
+Terminal=false\n\
+X-GNOME-Autostart-enabled=true\n";
+        std::fs::write(&path, body).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(&legacy);
+    } else {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&legacy);
+    }
+
     let mut cfg = AppConfig::load(&state.index_dir());
     cfg.autostart = enabled;
     cfg.save(&state.index_dir()).map_err(|e| e.to_string())
@@ -186,37 +266,16 @@ fn write_accels_to_cfg(cfg: &mut AppConfig, accels: &[String]) {
 ///      不回滚已成功项（旧实现一键冲突即全套热键静默失效）。
 ///
 /// 返回被跳过的键列表（空 = 全部生效），供调用方提示用户。
-pub fn register_hotkeys(app: &AppHandle, bindings: &[(String, String)]) -> Vec<String> {
-    let gs = app.global_shortcut();
-    if let Err(e) = gs.unregister_all() {
-        eprintln!("清空旧热键失败: {e}");
-    }
-
-    let mut skipped: Vec<String> = Vec::new();
-    for (action, accel) in bindings {
-        if !GLOBAL_HOTKEY_ACTIONS.contains(&action.as_str()) {
-            continue;
-        }
-        let accel = accel.trim();
-        if accel.is_empty() {
-            continue;
-        }
-        let handle = app.clone();
-        // 解析（如 "Ctrl+Shift+Space" / "F3"）失败或已被占用都会返回 Err
-        let r = gs.on_shortcut(accel, move |_app, _shortcut, event| {
-            if event.state == ShortcutState::Pressed {
-                if let Some(w) = handle.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.set_focus();
-                }
-            }
-        });
-        if let Err(e) = r {
-            eprintln!("热键 `{accel}` 注册失败（可能被占用或格式非法）：{e}，该键已跳过");
-            skipped.push(accel.to_string());
-        }
-    }
-    skipped
+/// 注册热键。
+///
+/// **Tauri 1 / 麒麟 V10 约束**：v1 没有官方全局快捷键插件（那是 v2 的插件体系），
+/// 系统级热键在 Linux 下要额外接 X11 keybinder，且会劫持整个桌面按键。
+/// 内网离线部署场景下该能力优先级低，这里降级为「只保存配置、不注册系统级热键」；
+/// 窗口内快捷键（Ctrl+L / Ctrl+S / F3 等）由前端 keydown 处理，功能不受影响。
+///
+/// 返回被跳过的键列表（恒为空，保持与调用方契约一致）。
+pub fn register_hotkeys(_app: &AppHandle, _bindings: &[(String, String)]) -> Vec<String> {
+    Vec::new()
 }
 
 /// 启动时从配置恢复全局热键（失败仅告警，不阻塞 GUI）
@@ -275,7 +334,7 @@ pub fn apply_global_hotkeys(
 
 #[tauri::command]
 pub fn show_main_window(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("main") {
+    if let Some(w) = app.get_window("main") {
         w.show().map_err(|e| e.to_string())?;
         w.set_focus().map_err(|e| e.to_string())?;
     }
@@ -284,7 +343,7 @@ pub fn show_main_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn hide_main_window(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("main") {
+    if let Some(w) = app.get_window("main") {
         w.hide().map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -297,20 +356,36 @@ const TRAY_SHOW: &str = "tray_show";
 const TRAY_HIDE: &str = "tray_hide";
 const TRAY_QUIT: &str = "tray_quit";
 
-/// 创建系统托盘（任务卡 5.3）：菜单 `显示主窗口 / 隐藏 / 退出`；
-/// 左键单击托盘图标显示主窗口。图标取应用默认窗口图标。
-pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, TRAY_SHOW, "显示主窗口", true, None::<&str>)?;
-    let hide = MenuItem::with_id(app, TRAY_HIDE, "隐藏", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, TRAY_QUIT, "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
+/// 构造系统托盘（Tauri 1：托盘对象在 Builder 上注册）。
+/// 菜单 `显示主窗口 / 隐藏 / 退出`，左键单击托盘图标显示主窗口。
+pub fn tray_menu() -> SystemTray {
+    let show = CustomMenuItem::new(TRAY_SHOW, "显示主窗口");
+    let hide = CustomMenuItem::new(TRAY_HIDE, "隐藏");
+    let quit = CustomMenuItem::new(TRAY_QUIT, "退出");
+    let menu = SystemTrayMenu::new()
+        .add_item(show)
+        .add_native_item(SystemTrayMenuItem::Separator)
+        .add_item(hide)
+        .add_native_item(SystemTrayMenuItem::Separator)
+        .add_item(quit);
 
-    let mut builder = TrayIconBuilder::new()
-        .tooltip("search-tool 全文搜索")
-        .menu(&menu)
-        // 左键单击只显示主窗口，不弹出菜单
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
+    // 托盘图标：内嵌 32x32 PNG（v1 的 SystemTray 不带默认图标，不设则托盘区不可见）
+    let icon = tauri::Icon::Raw(include_bytes!("../../icons/32x32.png").to_vec());
+
+    SystemTray::new()
+        .with_icon(icon)
+        .with_tooltip("EyzSearch 本地全文搜索")
+        .with_menu(menu)
+}
+
+/// 托盘事件分发（Builder::on_system_tray_event 注册的全局回调）
+pub fn on_tray_event(app: &AppHandle, event: SystemTrayEvent) {
+    match event {
+        // 左键单击 / 双击 → 显示并聚焦主窗口
+        SystemTrayEvent::LeftClick { .. } | SystemTrayEvent::DoubleClick { .. } => {
+            let _ = show_main_window(app.clone());
+        }
+        SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
             TRAY_SHOW => {
                 let _ = show_main_window(app.clone());
             }
@@ -319,31 +394,16 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             TRAY_QUIT => app.exit(0),
             _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            // 左键抬起 → 显示并聚焦主窗口
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                let _ = show_main_window(tray.app_handle().clone());
-            }
-        });
-
-    if let Some(icon) = app.default_window_icon() {
-        builder = builder.icon(icon.clone());
+        },
+        _ => {}
     }
-    builder.build(app)?;
-    Ok(())
 }
 
 /// 窗口关闭行为：`AppConfig.close_to_tray` 为 true 时拦截 `CloseRequested` → `hide()` 而非退出。
 ///
 /// 每次关闭都实时读盘，保证设置页切换「关闭到托盘」后无需重启即生效。
 pub fn setup_close_to_tray(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
+    let Some(window) = app.get_window("main") else {
         return;
     };
     let handle = app.clone();
@@ -355,7 +415,7 @@ pub fn setup_close_to_tray(app: &AppHandle) {
                 .unwrap_or(false);
             if close_to_tray {
                 api.prevent_close();
-                if let Some(w) = handle.get_webview_window("main") {
+                if let Some(w) = handle.get_window("main") {
                     let _ = w.hide();
                 }
             }
@@ -453,7 +513,7 @@ pub fn setup_single_instance_socket(app: &AppHandle) -> anyhow::Result<()> {
 ///
 /// Windows 无 Unix domain socket；命名管道需 `windows-sys` FFI（unsafe），
 /// 故选 std 即有的 TCP loopback：主实例 bind `127.0.0.1:0` 取随机端口，
-/// 写入 `index_dir/search-tool.port`（临时文件 + rename，避免半行被并发读），
+/// 写入 `index_dir/eyzsearch.port`（临时文件 + rename，避免半行被并发读），
 /// CLI 二启读端口文件连通后走同一 JSON 行协议（`handle_socket_op` 复用）。
 ///
 /// 探测语义对齐 Unix 分支：端口文件在且能连通 → 已有实例，不重复监听。
@@ -504,7 +564,7 @@ pub fn setup_single_instance_tcp(app: &AppHandle) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Windows 端口文件路径（`index_dir/search-tool.port`）
+/// Windows 端口文件路径（`index_dir/eyzsearch.port`）
 #[cfg(windows)]
 pub fn port_file_path(index_dir: &std::path::Path) -> PathBuf {
     index_dir.join(PORT_FILE)
@@ -567,12 +627,11 @@ fn handle_socket_op(app: &AppHandle, line: &str, mut w: impl std::io::Write) {
                     serde_json::json!({"ok": false, "error": "空查询"}).to_string()
                 } else {
                     {
-                        use tauri::Emitter as _;
-                        if let Some(win) = app.get_webview_window("main") {
+                        if let Some(win) = app.get_window("main") {
                             let _ = win.show();
                             let _ = win.set_focus();
                         }
-                        let _ = app.emit("external-search", payload);
+                        let _ = app.emit_all("external-search", payload);
                     }
                     serde_json::json!({"ok": true}).to_string()
                 }

@@ -1,13 +1,19 @@
-# everytxt
+# EyzSearch 全文搜索
 
-**everytxt** 是一款本地全文搜索引擎：对磁盘上的文档建立内容索引，支持全文检索、
-正则、时间过滤、拼音与同义词通道；覆盖文本、压缩包、Office、PDF、电子书等格式，
-扫描件经 OCR 识别后同样可搜。索引与检索全程在本地完成，文档内容不会离开你的电脑。
+本地文件内容全文搜索工具，面向**银河麒麟 V10 桌面版 / arm64（飞腾等）**。
 
-桌面端基于 [Tauri](https://tauri.app/) + [React](https://react.dev/)，
-引擎为 Rust 实现。
+时间该花在正事上，不该耗在找文件上。所有索引与检索都在本机完成，不联网、不上传任何内容。
+
+基于 [shadyrispy/everytxt](https://github.com/shadyrispy/everytxt) 二次开发，
+桌面端 [Tauri](https://tauri.app/) + [React](https://react.dev/)，引擎 Rust。
 
 ## 功能特性
+
+- **办公文档**：Word / Excel / PowerPoint、WPS 文字表格演示、PDF、电子书、纯文本
+- **保密标签**：带保密标签文件内容可检索（`.SJZ` 加密容器透明解密，无需手动解包）
+- **离线 OCR**：默认关闭，可在「设置 → 文档识别」开启，扫描件与图片转可检索文字
+- **增量索引**：重建时只处理新增与修改过的文件，未变文件走提取缓存
+- **高级语法**：`&` 与、`|` 或、`!` 非、`()` 分组、`""` 精确
 
 - **全文检索**：分词（[jieba-rs](https://crates.io/crates/jieba-rs)）+ 全文索引
   （[tantivy](https://crates.io/crates/tantivy) / [rusqlite](https://crates.io/crates/rusqlite)），
@@ -24,6 +30,25 @@
 - **索引管理**：目录规则（glob）、定时索引、暂停/继续/取消、实时文件监听
   （[notify](https://crates.io/crates/notify)）
 - **桌面集成**：全局热键、托盘、右击目录搜索（Linux/macOS）、回收站删除
+
+## 安装
+
+从 [Releases](https://github.com/Eyzer/EyzSearch-kylin-arm64/releases) 下载对应 deb，双击安装或用命令行：
+
+```bash
+sudo dpkg -i EyzSearch_0.2.4+kylin1_arm64.deb
+sudo apt-get -f install    # 缺依赖时补齐
+```
+
+**运行环境**：银河麒麟 V10 桌面版（webkit2gtk-4.0 / glibc 2.28），arm64。
+安装后从开始菜单启动「EyzSearch」，或在终端执行 `eyzsearch`。
+
+命令行索引（适合定时任务）：
+
+```bash
+eyzsearch cli index --dir /home/user/文档          # 增量
+eyzsearch cli index --dir /home/user/文档 --full   # 强制全量重建
+```
 
 ## 技术栈
 

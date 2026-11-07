@@ -2,7 +2,7 @@
  * 子项 4：预览交互全家桶 —— 前端 invoke 封装
  * 所有权：子项 4 agent（其他子项勿改）
  */
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/tauri'
 import type {
   DocumentPayload,
   FileInfo,

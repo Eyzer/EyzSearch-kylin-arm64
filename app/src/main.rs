@@ -1,10 +1,10 @@
-//! search-tool 入口：Tauri GUI + headless CLI 双模式
+//! eyzsearch 入口：Tauri GUI + headless CLI 双模式
 //!
 //! CLI 模式让软件在无 GUI 环境（服务器/CI/冒烟测试）完整可运行：
-//!   search-tool cli index  --dir <目录> [--index-dir <路径>]
-//!   search-tool cli search <查询> --mode fuzzy|exact|dsl [--reverse] [--limit N]
-//!   search-tool cli stats
-//!   search-tool cli testdata  # 生成演示语料并索引（冒烟用）
+//!   eyzsearch cli index  --dir <目录> [--index-dir <路径>]
+//!   eyzsearch cli search <查询> --mode fuzzy|exact|dsl [--reverse] [--limit N]
+//!   eyzsearch cli stats
+//!   eyzsearch cli testdata  # 生成演示语料并索引（冒烟用）
 //!
 //! 错误处理口径（P2 修复）：CLI 失败一律 `eprintln` + `exit(1)`，
 //! 不再裸 `unwrap`/`expect`（避免 panic 栈 + 退出码不统一）。
@@ -12,7 +12,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "search-tool", about = "everytxt —— 本地全文搜索引擎")]
+#[command(name = "eyzsearch", about = "EyzSearch —— 本地全文搜索引擎")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -48,6 +48,9 @@ enum CliSub {
         dir: String,
         #[arg(long)]
         index_dir: Option<String>,
+        /// 忽略清单强制全量重建：写影子索引，完成后整体替换（旧索引全程可查）
+        #[arg(long)]
+        full: bool,
     },
     /// 搜索
     Search {
@@ -74,7 +77,7 @@ enum CliSub {
 }
 
 fn main() {
-    //`search-tool /s 关键字 [/d 盘符] [/e 后缀]` 风格
+    //`eyzsearch /s 关键字 [/d 盘符] [/e 后缀]` 风格
     // 仅当 argv[1] 以 '/' 开头才启用映射，不影响 `cli ...` / `--open-dir` 等正常入口
     let argv: Vec<String> = preprocess_slash_args(&std::env::args().collect::<Vec<_>>());
     let cli = Cli::parse_from(argv);
@@ -224,21 +227,46 @@ fn run_cli(sub: CliSub) {
     };
 
     match sub {
-        CliSub::Index { dir, index_dir } => {
+        CliSub::Index {
+            dir,
+            index_dir,
+            full,
+        } => {
             let index_dir = resolve_index_dir(&index_dir);
             cli_out!("索引目录: {} → {}", dir, index_dir.display());
-            let stats = die(
-                search_tool_lib::indexer::index_directory(
-                    std::path::Path::new(&dir),
-                    &index_dir,
-                    |done, total| {
-                        if done == total || done % 100 == 0 {
-                            cli_out!("  进度: {}/{}", done, total);
-                        }
-                    },
-                ),
-                "索引失败",
-            );
+            let progress = |done: usize, total: usize| {
+                if done == total || done % 100 == 0 {
+                    cli_out!("  进度: {}/{}", done, total);
+                }
+            };
+            let stats = if full {
+                let cfg =
+                    stcore::config::Config::load(&index_dir).unwrap_or_default();
+                cli_out!("模式: 全量重建（影子索引，完成后整体替换）");
+                die(
+                    search_tool_lib::indexer::index_directory_mode(
+                        std::path::Path::new(&dir),
+                        &index_dir,
+                        &stcore::config::RuleSet::empty(),
+                        &cfg,
+                        search_tool_lib::indexer::IndexMode::Full,
+                        None,
+                        |p: search_tool_lib::indexer::ScanProgress| {
+                            progress(p.done, p.total)
+                        },
+                    ),
+                    "索引失败",
+                )
+            } else {
+                die(
+                    search_tool_lib::indexer::index_directory(
+                        std::path::Path::new(&dir),
+                        &index_dir,
+                        progress,
+                    ),
+                    "索引失败",
+                )
+            };
             cli_out!(
                 "完成: 扫描 {} 个文件, 索引 {} 篇文档",
                 stats.scanned,
@@ -290,7 +318,7 @@ fn run_cli(sub: CliSub) {
         }
         CliSub::Testdata { index_dir } => {
             let index_dir = resolve_index_dir(&index_dir);
-            let demo = std::env::temp_dir().join("search-tool-demo");
+            let demo = std::env::temp_dir().join("eyzsearch-demo");
             let _ = std::fs::remove_dir_all(&demo);
             die(std::fs::create_dir_all(&demo), "创建演示目录失败");
             let samples = [
@@ -338,7 +366,7 @@ fn run_cli(sub: CliSub) {
                 stats.scanned,
                 stats.indexed
             );
-            cli_out!("\n试试: search-tool cli search 中华人民共和国 --mode fuzzy");
+            cli_out!("\n试试: eyzsearch cli search 中华人民共和国 --mode fuzzy");
         }
     }
 }
@@ -382,7 +410,7 @@ mod tests {
     #[test]
     fn slash_mode_maps_flags() {
         let got = preprocess_slash_args(&v(&[
-            "search-tool",
+            "eyzsearch",
             "/s",
             "量子计算",
             "/d",
@@ -393,7 +421,7 @@ mod tests {
         assert_eq!(
             got,
             v(&[
-                "search-tool",
+                "eyzsearch",
                 "--search",
                 "量子计算",
                 "--drive",
@@ -406,11 +434,11 @@ mod tests {
 
     #[test]
     fn slash_mode_case_insensitive() {
-        let got = preprocess_slash_args(&v(&["search-tool", "/S", "kw", "/D", "C:/", "/E", "md"]));
+        let got = preprocess_slash_args(&v(&["eyzsearch", "/S", "kw", "/D", "C:/", "/E", "md"]));
         assert_eq!(
             got,
             v(&[
-                "search-tool",
+                "eyzsearch",
                 "--search",
                 "kw",
                 "--drive",
@@ -424,23 +452,23 @@ mod tests {
     #[test]
     fn slash_mode_keeps_non_flag_tokens() {
         // 查询词本身以 / 开头（路径）不被误映射
-        let got = preprocess_slash_args(&v(&["search-tool", "/s", "/usr/share", "/e", "log"]));
+        let got = preprocess_slash_args(&v(&["eyzsearch", "/s", "/usr/share", "/e", "log"]));
         assert_eq!(
             got,
-            v(&["search-tool", "--search", "/usr/share", "--ext", "log"])
+            v(&["eyzsearch", "--search", "/usr/share", "--ext", "log"])
         );
     }
 
     #[test]
     fn normal_subcommand_untouched() {
         // argv[1] 非 '/' 开头：整组参数原样（含组内 /s）
-        let args = v(&["search-tool", "cli", "search", "/s"]);
+        let args = v(&["eyzsearch", "cli", "search", "/s"]);
         assert_eq!(preprocess_slash_args(&args), args);
     }
 
     #[test]
     fn single_arg_untouched() {
-        let args = v(&["search-tool"]);
+        let args = v(&["eyzsearch"]);
         assert_eq!(preprocess_slash_args(&args), args);
     }
 

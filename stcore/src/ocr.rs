@@ -29,15 +29,42 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 
 use crate::extract::ExtractError;
 
-/// OCR 是否启用（默认关；`SEARCH_TOOL_OCR=1` 开）
+/* ------------------------------ 全局开关 ------------------------------ */
+
+/// 进程级 OCR 开关（由宿主从配置注入；默认关）。
+static OCR_ON: AtomicBool = AtomicBool::new(false);
+/// 是否已被宿主显式设置（未设置时回退环境变量，供 CLI / 调试脚本使用）
+static OCR_INITED: AtomicBool = AtomicBool::new(false);
+
+/// 显式设置 OCR 开关（GUI 启动时读 `app.json` 注入，设置页改动时同步）
+///
+/// 一旦调用过，`enabled()` 就只认这个值，**不再看环境变量**——
+/// 避免旧启动脚本残留的 `SEARCH_TOOL_OCR=1` 把用户关掉的开关又顶开。
+pub fn set_enabled(on: bool) {
+    OCR_ON.store(on, Ordering::SeqCst);
+    OCR_INITED.store(true, Ordering::SeqCst);
+}
+
+/// 当前开关是否已被宿主接管
+pub fn is_managed() -> bool {
+    OCR_INITED.load(Ordering::SeqCst)
+}
+
+/// OCR 是否启用
+///
+/// 优先级：宿主注入的配置 > 环境变量 `SEARCH_TOOL_OCR`（CLI / 调试用）。
+/// **默认关闭**（plan §5.2 `ocr_images=false`）。
 pub fn enabled() -> bool {
+    if OCR_INITED.load(Ordering::SeqCst) {
+        return OCR_ON.load(Ordering::SeqCst);
+    }
     matches!(
         std::env::var("SEARCH_TOOL_OCR").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
@@ -153,6 +180,50 @@ fn tmp_image_path(idx: u32, ext: &str) -> PathBuf {
 }
 
 /// 调用 helper 处理**单个图像文件**，返回原始响应（供文本/bbox 两条路径共用）
+///
+/// ## 常驻连接（Unix）
+/// helper 启动时要加载 ONNX Runtime + 三个 PP-OCR 模型，代价通常在数百毫秒到数秒。
+/// 旧实现**每张图 / 每页 PDF 都 spawn 一次**，20 页扫描件就白等十几秒。
+/// 现在改为长连接（stdin 一行请求 → stdout 一行响应），模型只加载一次。
+///
+/// Windows 保持单次 spawn：该平台 stdin 管道存在 `ERROR_PIPE_BUSY(231)` 的历史问题
+/// （见模块文档），且不是本项目交付目标。
+#[cfg(unix)]
+fn call_helper(path: &Path) -> Result<HelperResponse, ExtractError> {
+    let _guard = lock().lock().unwrap_or_else(|e| e.into_inner());
+    let cell = conn_cell();
+    let mut g = cell.lock().unwrap_or_else(|e| e.into_inner());
+
+    if helper_path().is_none() {
+        return Err(ExtractError::Unsupported(
+            "OCR helper 未就绪（见 ocr-helper/README.md）".to_string(),
+        ));
+    }
+
+    let req = serde_json::json!({ "image_path": path.to_string_lossy() }).to_string();
+
+    // 首次使用或上次出错后重连（helper 崩溃不应让整个索引任务失败）
+    if g.is_none() {
+        *g = Some(HelperConn::spawn()?);
+    }
+    let conn = g.as_mut().unwrap();
+    let resp = conn.call(&req);
+    if resp.is_err() {
+        *g = None; // 连接已不可信，丢弃；下次重新拉起
+    }
+
+    let resp = resp?;
+    if !resp.ok {
+        return Err(io_err(format!(
+            "OCR 失败: {}",
+            resp.error.unwrap_or_else(|| "未知错误".to_string())
+        )));
+    }
+    Ok(resp)
+}
+
+/// 单次 spawn 版（Windows）：请求走 argv，响应走 stdout
+#[cfg(not(unix))]
 fn call_helper(path: &Path) -> Result<HelperResponse, ExtractError> {
     let helper = helper_path().ok_or_else(|| {
         ExtractError::Unsupported("OCR helper 未就绪（见 ocr-helper/README.md）".to_string())
@@ -161,8 +232,6 @@ fn call_helper(path: &Path) -> Result<HelperResponse, ExtractError> {
     let _guard = lock().lock().unwrap_or_else(|e| e.into_inner());
 
     let req = serde_json::json!({ "image_path": path.to_string_lossy() }).to_string();
-    // 请求走 argv（见模块文档：Windows stdin 管道 PIPE_BUSY 规避）；
-    // 响应走 stdout 管道（INBOUND 服务器 + GEN_WRITE 客户端方向，各平台均正常）
     let mut child = Command::new(&helper)
         .arg(&req)
         .stdin(Stdio::null())
@@ -193,6 +262,90 @@ fn call_helper(path: &Path) -> Result<HelperResponse, ExtractError> {
         )));
     }
     Ok(resp)
+}
+
+/* ------------------------- 常驻 helper 连接（Unix） ------------------------- */
+
+#[cfg(unix)]
+use std::io::Write;
+
+#[cfg(unix)]
+use std::process::{Child, ChildStdin, ChildStdout};
+
+/// 常驻 helper 进程：模型在首次请求时加载，之后复用
+#[cfg(unix)]
+struct HelperConn {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+#[cfg(unix)]
+impl Drop for HelperConn {
+    fn drop(&mut self) {
+        // 关闭 stdin 让 helper 读到 EOF 自然退出；再用 kill 兜底
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(unix)]
+impl HelperConn {
+    fn spawn() -> Result<Self, ExtractError> {
+        let helper = helper_path().ok_or_else(|| {
+            ExtractError::Unsupported("OCR helper 未就绪（见 ocr-helper/README.md）".to_string())
+        })?;
+        let mut child = Command::new(&helper)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| io_err(format!("启动 OCR helper 失败: {e}")))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io_err("无法写入 OCR helper stdin".to_string()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io_err("无法读取 OCR helper stdout".to_string()))?;
+        Ok(Self {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    /// 一行请求 → 一行响应
+    fn call(&mut self, req: &str) -> Result<HelperResponse, ExtractError> {
+        self.stdin
+            .write_all(req.as_bytes())
+            .and_then(|_| self.stdin.write_all(b"\n"))
+            .and_then(|_| self.stdin.flush())
+            .map_err(|e| io_err(format!("发送 OCR 请求失败: {e}")))?;
+
+        let mut line = String::new();
+        let n = self
+            .stdout
+            .read_line(&mut line)
+            .map_err(|e| io_err(format!("读取 OCR 响应失败: {e}")))?;
+        if n == 0 {
+            return Err(io_err("OCR helper 已退出".to_string()));
+        }
+        let s = line.trim();
+        if s.is_empty() {
+            return Err(io_err("OCR helper 返回空行".to_string()));
+        }
+        serde_json::from_str::<HelperResponse>(s)
+            .map_err(|e| io_err(format!("OCR 响应解析失败: {e}; 原文: {s}")))
+    }
+}
+
+/// 常驻连接单元（进程内唯一）
+#[cfg(unix)]
+fn conn_cell() -> &'static Mutex<Option<HelperConn>> {
+    static C: OnceLock<Mutex<Option<HelperConn>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(None))
 }
 
 /// 调用 helper 对**单个图像文件**做 OCR，返回识别文本（行以 \n 连接）。

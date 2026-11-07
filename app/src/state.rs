@@ -92,6 +92,9 @@ impl AppState {
 }
 
 /// 默认索引目录：平台数据目录/search-tool/index
+///
+/// 目录名沿用 `search-tool`：这是既有安装的数据位置，改掉等于让老用户
+/// 的索引与历史记录失效，故只改对外显示名、不动数据路径。
 pub fn default_index_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("SEARCH_TOOL_INDEX_DIR") {
         return PathBuf::from(dir);

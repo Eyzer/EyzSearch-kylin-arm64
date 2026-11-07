@@ -282,7 +282,26 @@ export interface AppConfig {
   closeToTray: boolean
   /** 右击目录搜索（shell 集成）开关（P5） */
   rightClickSearch: boolean
+  /**
+   * OCR 识别开关（图片 / 扫描型 PDF）。**默认关闭**。
+   * 开启后，无文字层的扫描件才走 OCR；代价是索引耗时明显增加。
+   */
+  ocrEnabled: boolean
   hotkeys: HotkeyBinding[]
+}
+
+/** OCR 运行状态（设置页提示用） */
+export interface OcrStatus {
+  /** 当前开关值 */
+  enabled: boolean
+  /** helper 二进制是否就位（缺失时开关打开也不会有识别结果） */
+  helperReady: boolean
+}
+
+/** 应用名与版本（「关于」面板） */
+export interface AppInfo {
+  name: string
+  version: string
 }
 
 /* ================== 应用外壳：菜单/工具栏动作枚举 ================== */

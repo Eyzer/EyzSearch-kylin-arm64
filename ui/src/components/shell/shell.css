@@ -429,3 +429,122 @@
 .settings-feedback.err {
   color: var(--c-danger);
 }
+
+/* ------------------------------ 关于对话框 ------------------------------ */
+
+.about-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(620px, 92vw);
+  max-height: 82vh;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border-strong);
+  border-radius: 6px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.about-body {
+  padding: 16px 20px 8px;
+  font-size: var(--fs-ui);
+  color: var(--c-text);
+}
+
+.about-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--c-border);
+}
+.about-logo {
+  flex: 0 0 auto;
+  line-height: 0;
+}
+.about-brand-text {
+  min-width: 0;
+}
+.about-name {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+.about-tagline {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--c-text-dim);
+}
+.about-version {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--c-accent);
+}
+
+.about-intro {
+  margin: 12px 0 0;
+  line-height: 1.65;
+  color: var(--c-text);
+}
+
+.about-sub {
+  margin: 16px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--c-text-dim);
+  letter-spacing: 0.5px;
+}
+
+.about-list {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.7;
+}
+.about-list li::marker {
+  color: var(--c-accent);
+}
+
+.about-kv {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: 6px 12px;
+  margin: 16px 0 0;
+  line-height: 1.6;
+}
+.about-kv dt {
+  color: var(--c-text-dim);
+  font-size: 12px;
+}
+.about-kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.about-link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--c-accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.about-link:hover {
+  color: var(--c-accent-strong, var(--c-accent));
+}
+
+.about-err {
+  margin-top: 10px;
+  color: var(--c-danger);
+  font-size: 12px;
+}
+
+.about-copyright {
+  margin: 18px 0 12px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--c-text-dim);
+}
+
+.about-foot-spacer {
+  flex: 1 1 auto;
+}

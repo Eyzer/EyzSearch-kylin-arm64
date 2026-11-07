@@ -1,38 +1,66 @@
 {
-  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
-  "productName": "search-tool",
-  "version": "0.1.0",
-  "identifier": "cn.searchtool.app",
+  "$schema": "https://schema.tauri.app/config/1",
   "build": {
-    "frontendDist": "../ui/dist",
-    "devUrl": "http://localhost:1420",
     "beforeDevCommand": "cd ../ui && pnpm dev",
-    "beforeBuildCommand": "cd ../ui && pnpm build"
+    "beforeBuildCommand": "cd ../ui && pnpm build",
+    "devPath": "http://localhost:1420",
+    "distDir": "../ui/dist"
   },
-  "app": {
-    "windows": [],
+  "package": {
+    "productName": "EyzSearch",
+    "version": "0.2.4"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": false,
+      "app": {
+        "all": true
+      },
+      "path": {
+        "all": true
+      },
+      "os": {
+        "all": true
+      },
+      "window": {
+        "all": true
+      },
+      "dialog": {
+        "all": false,
+        "open": true,
+        "save": true,
+        "message": true,
+        "ask": true,
+        "confirm": true
+      }
+    },
+    "bundle": {
+      "active": true,
+      "identifier": "cn.searchtool.app",
+      "publisher": "Eyzer <eyzer@qq.com>",
+      "targets": ["deb"],
+      "icon": [
+        "icons/32x32.png",
+        "icons/64x64.png",
+        "icons/128x128.png",
+        "icons/128x128@2x.png",
+        "icons/256x256.png",
+        "icons/512x512.png",
+        "icons/icon.ico"
+      ],
+      "resources": {
+        "../third_party/pdfium/lib/*": "lib/",
+        "../third_party/ocr-models": "lib/eyzsearch/models"
+      },
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.0-37"
+        ]
+      }
+    },
     "security": {
       "csp": null
-    }
-  },
-  "plugins": {
-    "updater": {
-      "endpoints": ["https://example.invalid/latest.json"],
-      "pubkey": ""
-    }
-  },
-  "bundle": {
-    "active": true,
-    "targets": ["deb", "appimage"],
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.ico"
-    ],
-    "resources": {
-      "../third_party/pdfium/lib/*": "lib/",
-      "../third_party/ocr-models": "lib/search-tool/models"
-    }
+    },
+    "windows": []
   }
 }

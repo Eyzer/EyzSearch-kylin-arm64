@@ -4,7 +4,7 @@
  *
  * 注：listIndexedRoots / listFileTypes 供子项 1 的搜索条件下拉复用，勿改签名。
  */
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/tauri'
 import type {
   DirRule,
   FileType,
@@ -99,4 +99,21 @@ export function cancelRebuild(): Promise<void> {
 
 export function setIndexPaused(paused: boolean): Promise<void> {
   return invoke<void>('set_index_paused', { paused })
+}
+
+/** 移除已索引根目录（同时删除该目录下的索引文档，返回删除条数） */
+export function removeIndexedRoot(path: string): Promise<number> {
+  return invoke<number>('remove_indexed_root', { path })
+}
+
+/* ---------- 参与索引的文件类型 ---------- */
+
+/** 参与索引的类型 id（空数组 = 全部类型） */
+export function getIndexTypes(): Promise<number[]> {
+  return invoke<number[]>('get_index_types')
+}
+
+/** 设置参与索引的类型（空数组 = 全部类型）；下次索引/重建生效 */
+export function setIndexTypes(ids: number[]): Promise<void> {
+  return invoke<void>('set_index_types', { ids })
 }

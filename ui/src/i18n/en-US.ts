@@ -29,7 +29,7 @@ const enUS: Record<string, string> = {
   'menu.help': 'Help(H)',
   'menu.help.syntax': 'Advanced Search Syntax',
   'menu.help.homepage': 'Project Home',
-  'menu.help.about': 'About search-tool',
+  'menu.help.about': 'About EyzSearch',
 
   /* MenuBar: advanced search syntax panel */
   'syntax.title': 'Advanced Search Syntax',
@@ -88,17 +88,18 @@ const enUS: Record<string, string> = {
   'welcome.step4': 'Click the "+" button above to filter results by directory and file type.',
   'welcome.tips.title': 'Tips',
   'welcome.tip1':
-    'Right-click any folder and choose "Search with search-tool" to search within it quickly;',
+    'Right-click any folder and choose "Search with EyzSearch" to search within it quickly;',
   'welcome.tip2': 'Enable the tray icon and global hotkey to summon the main window anytime;',
   'welcome.tip3': 'Hover over a result for 1 second to preview the matched text snippet;',
   'welcome.tip4': 'Customize accelerator keys under "Options → Hotkeys".',
   'welcome.more': '…More useful and efficient features are waiting for you to explore.',
-  'welcome.about.title': 'About everytxt',
+  'welcome.about.title': 'About EyzSearch',
   'welcome.about.body1':
-    'everytxt is a local full-text search engine: safe, ad-free, and leak-free. Use with confidence.',
+    'EyzSearch is a local file content search tool: local OCR search and content search across confidentiality-labelled documents, so your time goes to real work instead of hunting for files.',
   'welcome.about.body2':
-    'everytxt is free and open source: indexing and search run entirely on your machine, document content never leaves your computer. Feedback is welcome via the "Help" menu.',
-  'welcome.openHomepage': 'Visit Project Home',
+    'EyzSearch supports Office, WPS, PDF, ebooks and more, with transparent decryption of .SJZ controlled documents and offline OCR (off by default). Indexing and search run entirely on your machine — no network, no uploads.',
+  'welcome.about.author': 'Author: Eyzer   GitHub: https://github.com/Eyzer',
+  'welcome.openHomepage': "Visit Author's GitHub",
   /* ---- 7.9 / B6: check for updates ---- */
   'update.check': 'Check for Updates',
   'update.checking': 'Checking for updates…',

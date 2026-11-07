@@ -29,7 +29,7 @@ const zhCN: Record<string, string> = {
   'menu.help': '帮助(H)',
   'menu.help.syntax': '高级搜索语法速查',
   'menu.help.homepage': '项目主页',
-  'menu.help.about': '关于 search-tool',
+  'menu.help.about': '关于 EyzSearch',
 
   /* MenuBar：高级搜索语法速查面板 */
   'syntax.title': '高级搜索语法',
@@ -85,16 +85,18 @@ const zhCN: Record<string, string> = {
   'welcome.step3': '点击搜索结果中的条目，右侧将生成该文件的预览；',
   'welcome.step4': '点击上方的「+」按钮，还可以按目录与文件类型过滤结果。',
   'welcome.tips.title': '使用技巧',
-  'welcome.tip1': '右击任意目录选择「用 search-tool 搜索」，可以快速按该目录搜索；',
+  'welcome.tip1': '右击任意目录选择「用 EyzSearch 搜索」，可以快速按该目录搜索；',
   'welcome.tip2': '开启托盘与全局热键，随时唤起主窗口进行搜索；',
   'welcome.tip3': '搜索结果列表鼠标悬停 1 秒，可快速预览命中的文字片段；',
   'welcome.tip4': '在「设置 → 快捷键」中可自定义唤醒等操作的加速键。',
   'welcome.more': '……更多实用、高效的功能等待你的探索。',
-  'welcome.about.title': '关于 everytxt',
-  'welcome.about.body1': 'everytxt 是一款本地全文搜索引擎：安全、无广告、无数据外泄，请放心使用。',
+  'welcome.about.title': '关于 EyzSearch 全文搜索',
+  'welcome.about.body1':
+    'EyzSearch 是一款本地文件全文搜索工具：支持本地 OCR 检索与带保密标签文件的内容检索，把时间留给正事，别耗在找文件上。',
   'welcome.about.body2':
-    'everytxt 免费且开源：索引与检索均在本地完成，文档内容不会离开你的电脑。欢迎通过菜单「帮助」提出意见和建议。',
-  'welcome.openHomepage': '访问项目主页',
+    'EyzSearch 支持 Office、WPS、PDF、电子书等常见格式，支持 .SJZ 加密受控文档透明解密与离线 OCR 文字识别（默认关闭）。索引与检索全部在本机完成，不联网、不上传任何内容。',
+  'welcome.about.author': '作者：Eyzer　GitHub：https://github.com/Eyzer',
+  'welcome.openHomepage': '访问作者 GitHub',
   /* ---- 7.9 / B6：检测更新 ---- */
   'update.check': '检测更新',
   'update.checking': '正在检查更新…',

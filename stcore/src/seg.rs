@@ -12,6 +12,7 @@
 //!
 //! 性能：Jieba::new() 解析 350 万词条词典以秒计，必须 OnceLock 缓存。
 
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 fn jieba() -> &'static jieba_rs::Jieba {
@@ -92,23 +93,86 @@ fn segment_chunk(chunk: &str) -> Vec<String> {
 }
 
 /// 索引侧分词：每块所有 1-3 字连续子串 + 整块本身
+/// 单块最大字符数：超长的「无空白块」按此长度切段后再生成 n-gram。
+///
+/// 中文正文通常整段不打空格，一个 `split_whitespace()` 出来的块可能有几十万字。
+/// 切段的实际收益是**控制内存与局部性**：字符边界表按块长度分配，
+/// 一整段 33 万字（1MB 中文）需要一份 264 万条目的 `Vec<usize>`（约 21MB），
+/// 切到 200 字后每块只有几十字节，峰值内存和缓存压力都降下来。
+const MAX_CHUNK_CHARS: usize = 200;
+
+/// 相邻切块的重叠字符数：保住跨块边界的 2-gram，尽量减少切点附近的漏检
+const CHUNK_OVERLAP_CHARS: usize = 3;
+
+/// 索引侧分词：每个空白块（超长的先切段）产出全部 1–3 字的连续子串。
+///
+/// ## 性能要点（旧实现的三个浪费，已改掉）
+/// 1. 旧版对每个 gram 都 `chars[s..s+len].iter().collect::<String>()` + `to_lowercase()`，
+///    再 `clone()` 进 `HashSet<String>` —— 1MB 中文约 100 万个 gram，就是 200 万次堆分配。
+///    现在用**字节切片** `&str` 去重，只对首次出现的 gram 分配一次。
+/// 2. 旧版把整个空白块也 push 成一个 token。中文几乎不打空格，等于把一整段话当一个词存进
+///    索引；而查询侧对 >3 字的词一律拆成 bigram，**这个超长 token 永远不会被命中**，纯占空间。
+/// 3. `Vec<char>` 全量收集换成字符边界表，省一次逐字分配。
 pub fn segment_index(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    // 借用 text 切片的去重集合：不产生额外分配
+    let mut seen: HashSet<&str> = HashSet::new();
+
     for chunk in text.split_whitespace() {
-        let chars: Vec<char> = chunk.chars().collect();
-        let n = chars.len();
-        if n > 0 {
-            out.push(chunk.to_lowercase());
+        if chunk.is_empty() {
+            continue;
         }
-        for len in 1..=3.min(n) {
-            for s in 0..=n - len {
-                out.push(chars[s..s + len].iter().collect::<String>().to_lowercase());
-            }
+        for part in split_long_chunk(chunk) {
+            push_ngrams(part, &mut out, &mut seen);
         }
     }
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|t| seen.insert(t.clone()));
     out
+}
+
+/// 把超长块切成 `MAX_CHUNK_CHARS` 字以内的若干片（相邻片重叠几字）
+fn split_long_chunk(chunk: &str) -> Vec<&str> {
+    // UTF-8 下字节数不大于 MAX 时，字符数必然也不大于 MAX，可直接放行
+    if chunk.len() <= MAX_CHUNK_CHARS {
+        return vec![chunk];
+    }
+    let mut bounds: Vec<usize> = chunk.char_indices().map(|(i, _)| i).collect();
+    bounds.push(chunk.len());
+    let n = bounds.len() - 1;
+
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    loop {
+        let end = (start + MAX_CHUNK_CHARS).min(n);
+        out.push(&chunk[bounds[start]..bounds[end]]);
+        if end >= n {
+            break;
+        }
+        // 回退几字做重叠；MAX 远大于 OVERLAP，不会原地打转
+        start = end - CHUNK_OVERLAP_CHARS;
+    }
+    out
+}
+
+/// 单块生成全部 1–3 字连续子串并写入 `out`
+fn push_ngrams<'a>(chunk: &'a str, out: &mut Vec<String>, seen: &mut HashSet<&'a str>) {
+    let mut bounds: Vec<usize> = Vec::with_capacity(64);
+    bounds.extend(chunk.char_indices().map(|(i, _)| i));
+    bounds.push(chunk.len());
+    let n = bounds.len() - 1;
+
+    for len in 1..=3.min(n) {
+        for s in 0..=n - len {
+            let piece = &chunk[bounds[s]..bounds[s + len]];
+            if !seen.insert(piece) {
+                continue; // 已收录，跳过（重复 gram 极多：中文常用词组反复出现）
+            }
+            out.push(if piece.is_ascii() {
+                piece.to_ascii_lowercase()
+            } else {
+                piece.to_lowercase()
+            });
+        }
+    }
 }
 
 /// 查询 token → term 列表：≤3 字原样；>3 字拆相邻 bigram
@@ -145,12 +209,35 @@ mod tests {
     }
 
     #[test]
+    fn long_chunk_is_split_into_workable_blocks() {
+        // 实测：7200 字连成一个空白块时整段静默丢失（索引里搜不到任何词）。
+        // 切块后必须仍能产出正常粒度的 gram。
+        let text = "系统运维管理平台数据档案".repeat(600); // 7200 字，无空格
+        let toks = segment_index(&text);
+        assert!(toks.contains(&"系统".to_string()), "长块仍须产出 2-gram");
+        assert!(toks.contains(&"档".to_string()), "长块仍须产出单字");
+        // 每块最多 MAX_CHUNK_CHARS 字 → 每块 gram 数有限
+        assert!(toks.len() < 3 * 7200, "去重后 token 数应远小于原始 gram 数");
+    }
+
+    #[test]
+    fn chunk_boundary_keeps_bigrams() {
+        // 切块处有重叠，跨切点的 2-gram 不应被吞掉
+        let text = "甲".repeat(MAX_CHUNK_CHARS) + "乙丙";
+        let toks = segment_index(&text);
+        assert!(toks.contains(&"甲乙".to_string()), "跨切点 2-gram 应保留");
+    }
+
+    #[test]
     fn index_side_has_single_chars() {
-        // 索引侧必须有单字粒度（S3 单字查询命中依据）
+        // 索引侧必须有单字 / 双字 / 三字粒度（S3 单字查询命中依据）
         let toks = segment_index("中华人民共和国");
         assert!(toks.contains(&"共".to_string()));
         assert!(toks.contains(&"华人".to_string()));
-        assert!(toks.contains(&"中华人民共和国".to_string()));
+        assert!(toks.contains(&"共和国".to_string()));
+        // >3 字的整块不进索引：查询侧对 >3 字一律拆 bigram，
+        // 长 token 永远命中不到，只会白占索引空间
+        assert!(!toks.contains(&"中华人民共和国".to_string()));
     }
 
     #[test]

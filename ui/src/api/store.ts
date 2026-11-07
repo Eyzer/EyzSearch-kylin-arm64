@@ -2,7 +2,7 @@
  * R3：搜索历史 / 书签 —— 前端 invoke 封装
  * DB 文件由后端定位（索引目录 search-tool.db）
  */
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/tauri'
 import type { Bookmark, HistoryEntry } from '../types'
 
 /** 最近搜索历史（新在前，默认 10 条） */

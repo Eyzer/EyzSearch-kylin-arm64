@@ -8,7 +8,8 @@
  *   IMAGE/BINARY/LEGACY）外加 dispatch() 内的字面量分支
  *   （eml/zip/tar/tgz/gz/bz2/7z/rar/chm）——后者同样能提取内容，
  *   不收进来会让「浏览添加」把 .chm 误报为不支持（chm 恰是手册示例）。
- *   已知缺口（不收）：wps/et/dps（anydoc 0.2.4 不支持）、djvu（无文本层）。
+ *   已知缺口（不收）：djvu（无文本层）。wps/et/dps 及其模板已纳入 LEGACY 链
+ *   （OLE 解析，失败时 strings 兜底）。
  */
 
 /** 目录条目：ext 小写无点 */
@@ -163,10 +164,13 @@ export const CATALOG: CatalogEntry[] = [
   { ext: 'ods', name: 'OpenDocument 表格', desc: 'ODF 开放电子表格' },
   { ext: 'odp', name: 'OpenDocument 演示', desc: 'ODF 开放演示文稿' },
 
-  /* --------------- WPS（目录保留；提取器暂不支持，浏览会提示） --------------- */
-  { ext: 'wps', name: 'WPS 文字文档', desc: 'WPS Office 文字文档（暂不支持提取）' },
-  { ext: 'et', name: 'WPS 表格', desc: 'WPS Office 电子表格（暂不支持提取）' },
-  { ext: 'dps', name: 'WPS 演示文稿', desc: 'WPS Office 演示文稿（暂不支持提取）' },
+  /* --------------- WPS 原生格式（OLE 复合文档，已支持提取） --------------- */
+  { ext: 'wps', name: 'WPS 文字文档', desc: 'WPS Office 文字文档' },
+  { ext: 'wpt', name: 'WPS 文字模板', desc: 'WPS Office 文字模板' },
+  { ext: 'et', name: 'WPS 表格', desc: 'WPS Office 电子表格' },
+  { ext: 'ett', name: 'WPS 表格模板', desc: 'WPS Office 电子表格模板' },
+  { ext: 'dps', name: 'WPS 演示文稿', desc: 'WPS Office 演示文稿' },
+  { ext: 'dpt', name: 'WPS 演示模板', desc: 'WPS Office 演示文稿模板' },
 
   /* -------------------------------- 图片 -------------------------------- */
   { ext: 'png', name: 'PNG 图片', desc: '便携网络图形（需 OCR）' },
@@ -238,8 +242,12 @@ const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff', 'tif', 'gif']
 /** BINARY_EXTS（mod.rs L200） */
 const BINARY_EXTS = ['exe', 'dll', 'so', 'dylib', 'bin']
 
-/** LEGACY_EXTS（mod.rs L206-208） */
-const LEGACY_EXTS = ['doc', 'dot', 'xls', 'xlsb', 'xlt', 'ppt', 'pps', 'pot', 'odt', 'ods', 'odp', 'rtf']
+/** LEGACY_EXTS（mod.rs L206-210） */
+const LEGACY_EXTS = [
+  'doc', 'dot', 'xls', 'xlsb', 'xlt', 'ppt', 'pps', 'pot', 'odt', 'ods', 'odp', 'rtf',
+  // WPS 原生（OLE 复合文档；anydoc 失败时由 strings 兜底）
+  'wps', 'wpt', 'et', 'ett', 'dps', 'dpt',
+]
 
 /**
  * dispatch() 字面量分支（mod.rs L288-409）：eml 与各压缩包格式不在上述常量表内，

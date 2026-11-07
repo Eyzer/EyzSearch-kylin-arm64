@@ -207,6 +207,8 @@ const BINARY_EXTS: &[&str] = &["exe", "dll", "so", "dylib", "bin"];
 /// 故 rtf/odt 归 anydoc（块级结构还原更完整）。
 const LEGACY_EXTS: &[&str] = &[
     "doc", "dot", "xls", "xlsb", "xlt", "ppt", "pps", "pot", "odt", "ods", "odp", "rtf",
+    // WPS 原生二进制（OLE 复合文档，多与 MS 旧格式同构）
+    "wps", "wpt", "et", "ett", "dps", "dpt",
 ];
 
 /// 提取错误：覆盖"读不了/不支持/超限/需 OCR"四类失败。

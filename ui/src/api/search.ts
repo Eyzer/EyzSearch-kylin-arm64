@@ -2,7 +2,7 @@
  * 子项 1：搜索模式与 DSL —— 前端 invoke 封装
  * 所有权：子项 1 agent（其他子项勿改）；R3：分页响应
  */
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/tauri'
 import type { SearchRequest, SearchResponse } from '../types'
 
 /**

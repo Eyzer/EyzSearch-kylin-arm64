@@ -67,66 +67,172 @@ struct Response {
 }
 
 fn main() {
-    let req = match read_request() {
-        Ok(r) => r,
+    // 模式一：单次调用 —— `ocr-helper '{"image_path":"..."}'`
+    // 保留它是为了向后兼容与手动排障（脚本里 echo 一行也能跑）。
+    if let Some(arg) = std::env::args().nth(1) {
+        let arg = arg.trim().to_string();
+        if !arg.is_empty() {
+            match serde_json::from_str::<Request>(&arg) {
+                Ok(req) => match run(&req) {
+                    Ok((lines, w, h)) => print_json(&Response {
+                        ok: true,
+                        lines: Some(lines),
+                        image_width: w,
+                        image_height: h,
+                        error: None,
+                    }),
+                    Err(e) => {
+                        print_json(&err_resp(e.to_string()));
+                        std::process::exit(1);
+                    }
+                },
+                Err(e) => {
+                    print_json(&err_resp(format!("argv 请求解析失败: {e}")));
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+    }
+    // 模式二：常驻服务 —— stdin 一行请求，stdout 一行响应
+    serve();
+}
+
+/// 常驻服务循环：**引擎只初始化一次**，之后复用。
+///
+/// 旧版每张图 / 每页 PDF 都 spawn 一次进程，等于每次都重新加载 ONNX Runtime
+/// 与三个 PP-OCR 模型（数百毫秒到数秒）。一份 20 页的扫描件就白等十几秒。
+///
+/// 出错不退出进程：单张图失败只回 `ok:false`，下一行请求照常处理。
+fn serve() {
+    use std::io::Write as _;
+
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let mut line = String::new();
+
+    // 引擎初始化失败也继续服务：后续每个请求都回同一条错误，
+    // 避免主程序反复重启一个注定失败的子进程。
+    let (det, rec, dict) = resolve_models();
+    let mut engine = match OAROCRBuilder::new(det, rec, dict).build() {
+        Ok(e) => Some(e),
         Err(e) => {
-            print_json(&Response {
-                ok: false,
-                lines: None,
-                image_width: 0,
-                image_height: 0,
-                error: Some(e.to_string()),
-            });
-            std::process::exit(1);
+            eprintln!("OCR 引擎初始化失败: {e}");
+            None
         }
     };
 
-    match run(&req) {
-        Ok((lines, w, h)) => print_json(&Response {
-            ok: true,
-            lines: Some(lines),
-            image_width: w,
-            image_height: h,
-            error: None,
-        }),
-        Err(e) => {
-            print_json(&Response {
-                ok: false,
-                lines: None,
-                image_width: 0,
-                image_height: 0,
-                error: Some(e.to_string()),
-            });
-            std::process::exit(1);
+    loop {
+        line.clear();
+        match input.read_line(&mut line) {
+            Ok(0) => break, // 主进程关闭了管道
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let raw = line.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        if raw == "exit" || raw == "quit" {
+            break;
+        }
+
+        // 全部内联：ocr.predict 的具体类型由编译器推断，不需要写出引擎类型名
+        let resp = match serde_json::from_str::<Request>(raw) {
+            Err(e) => err_resp(format!("请求解析失败: {e}")),
+            Ok(req) => {
+                let path = PathBuf::from(&req.image_path);
+                if !path.is_file() {
+                    err_resp(format!("图像不存在: {}", path.display()))
+                } else {
+                    match load_image(&path) {
+                        Err(e) => err_resp(format!("读取图像失败: {e}")),
+                        Ok(image) => match engine.as_mut() {
+                            None => err_resp("OCR 引擎不可用（模型或 ONNX Runtime 加载失败）".into()),
+                            Some(ocr) => {
+                                let (iw, ih) = (image.width(), image.height());
+                                match ocr.predict(vec![image]) {
+                                    Err(e) => err_resp(format!("识别失败: {e}")),
+                                    Ok(results) => {
+                                        let mut lines = Vec::new();
+                                        for page in &results {
+                                            for region in &page.text_regions {
+                                                let Some((text, confidence)) =
+                                                    region.text_with_confidence()
+                                                else {
+                                                    continue;
+                                                };
+                                                if text.trim().is_empty() {
+                                                    continue;
+                                                }
+                                                let bb = &region.bounding_box;
+                                                let (x, y) = (bb.x_min(), bb.y_min());
+                                                lines.push(Line {
+                                                    text: text.to_string(),
+                                                    confidence,
+                                                    bbox: [
+                                                        x,
+                                                        y,
+                                                        bb.x_max() - x,
+                                                        bb.y_max() - y,
+                                                    ],
+                                                });
+                                            }
+                                        }
+                                        Response {
+                                            ok: true,
+                                            lines: Some(lines),
+                                            image_width: iw,
+                                            image_height: ih,
+                                            error: None,
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+        };
+
+        // 立即 flush：主进程在另一头逐行等，缓冲住会死锁
+        match serde_json::to_string(&resp) {
+            Ok(s) => {
+                let out = std::io::stdout();
+                let mut lock = out.lock();
+                let _ = writeln!(lock, "{s}");
+                let _ = lock.flush();
+            }
+            Err(e) => {
+                let out = std::io::stdout();
+                let mut lock = out.lock();
+                let _ = writeln!(lock, r#"{{"ok":false,"error":"序列化失败: {e}"}}"#);
+                let _ = lock.flush();
+            }
         }
     }
 }
 
-fn read_request() -> Result<Request> {
-    // 首选 argv[1]：请求 JSON 字符串（规避 Windows stdin 管道 231 问题）
-    if let Some(arg) = std::env::args().nth(1) {
-        let arg = arg.trim();
-        if !arg.is_empty() {
-            return serde_json::from_str::<Request>(arg)
-                .map_err(|e| anyhow!("argv 请求解析失败: {e}"));
-        }
+fn err_resp(msg: String) -> Response {
+    Response {
+        ok: false,
+        lines: None,
+        image_width: 0,
+        image_height: 0,
+        error: Some(msg),
     }
-    // 回退 stdin：一行 JSON（手动调试协议）
-    let stdin = std::io::stdin();
-    let mut buf = String::new();
-    stdin.lock().read_line(&mut buf)?;
-    let buf = buf.trim();
-    if buf.is_empty() {
-        return Err(anyhow!("空请求：期望一行 JSON"));
-    }
-    Ok(serde_json::from_str::<Request>(buf)?)
 }
 
 fn print_json(resp: &Response) {
-    match serde_json::to_string(resp) {
-        Ok(s) => println!("{s}"),
-        Err(e) => println!(r#"{{"ok":false,"error":"序列化失败: {e}"}}"#),
-    }
+    use std::io::Write as _;
+    let s = match serde_json::to_string(resp) {
+        Ok(s) => s,
+        Err(e) => format!(r#"{{"ok":false,"error":"序列化失败: {e}"}}"#),
+    };
+    let out = std::io::stdout();
+    let mut lock = out.lock();
+    let _ = writeln!(lock, "{s}");
+    let _ = lock.flush();
 }
 
 /// 三个候选目录中第一个"三件套齐全"的；都没有则返回注册名（auto-download 回退）

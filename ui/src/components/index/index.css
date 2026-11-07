@@ -257,8 +257,67 @@
   overflow: auto;
 }
 .idx-roots li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 2px 0;
   overflow-wrap: anywhere;
+}
+.idx-root-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.idx-root-del {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  font-size: var(--fs-ui-sm, 12px);
+  color: var(--c-danger);
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0.75;
+}
+.idx-root-del:hover:not(:disabled) {
+  opacity: 1;
+}
+.idx-root-del:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* 索引类型多选 */
+.idx-type-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  background: var(--c-bg-sunken);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+}
+.idx-type-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-ui);
+  color: var(--c-text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.idx-type-item.all {
+  font-weight: 600;
+  padding-right: 10px;
+  margin-right: 4px;
+  border-right: 1px solid var(--c-border);
+}
+.idx-type-exts {
+  font-size: 11px;
+  color: var(--c-text-dim);
 }
 
 .idx-progress {

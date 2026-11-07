@@ -1,7 +1,7 @@
 //! 编码检测与文本解码。
 //!
-//! 策略：BOM 优先 → chardetng 统计检测（只取前 4KB 样本，控制大文件开销）
-//! → UTF-8 strict 兜底修正。解码一律 lossy：非法字节替换为 U+FFFD，不返回 Err，
+//! 策略：BOM 优先 → **整篇 UTF-8 严格校验** → chardetng 统计检测（截断对齐字符边界）
+//! → 兜底。解码一律 lossy：非法字节替换为 U+FFFD，不返回 Err，
 //! 因为提取层的职责是"尽量拿到可索引文本"，编码瑕疵不应阻断索引。
 
 use chardetng::EncodingDetector;
@@ -12,8 +12,14 @@ const SAMPLE_LEN: usize = 4096;
 
 /// 检测编码并解码为 String；返回 (文本, 编码名如 "UTF-8"/"GBK"/"GB18030"/"Big5"/"windows-1252")。
 ///
-/// 规则：BOM 优先 → chardetng 检测（取前 4KB 样本）→ UTF-8 strict 兜底。
-/// 解码失败字符用 U+FFFD 替换，不返回 Err。
+/// 规则：BOM → 整篇合法 UTF-8 → chardetng → lossy 兜底。
+///
+/// ## 为什么先整篇校验 UTF-8（曾经的严重 bug）
+/// 旧实现只对 `&bytes[..4096]` 做 `from_utf8` 校验。中文 UTF-8 是 3 字节/字，
+/// 4096 不是 3 的倍数，**几乎必然把最后一个汉字截成半个**——`from_utf8` 返回 Err，
+/// 于是落到 chardetng 的猜测（常猜 windows-1252），整篇中文被按单字节 Latin-1 解码，
+/// 变成 `ç³»` 这类乱码。后果是这些文件在索引里搜不到任何中文词，且**不报错**。
+/// 校验整篇只多一次线性扫描（GB/s 级），完全值得。
 pub fn decode_bytes(bytes: &[u8]) -> (String, &'static str) {
     if bytes.is_empty() {
         return (String::new(), "UTF-8");
@@ -24,22 +30,28 @@ pub fn decode_bytes(bytes: &[u8]) -> (String, &'static str) {
         return (decode_with(encoding, body), encoding_name(encoding));
     }
 
-    // 2. chardetng 统计检测（前 4KB 样本）
-    let sample = &bytes[..bytes.len().min(SAMPLE_LEN)];
+    // 2. 整篇是合法 UTF-8 → 直接按 UTF-8 解码（现代文档的绝对主流）
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return (s.to_string(), "UTF-8");
+    }
+
+    // 3. chardetng 统计检测（样本必须对齐字符边界，否则同样的截断问题会重演）
+    let take = bytes.len().min(SAMPLE_LEN);
+    let sample = utf8_aligned_prefix(bytes, take);
     let mut detector = EncodingDetector::new();
     detector.feed(sample, true);
-    let guess = detector.guess(None, true);
-
-    // 3. UTF-8 strict 兜底：chardetng 对纯 ASCII/英文常猜 windows-1252，
-    // 也可能把 UTF-8 文本误判成 GB18030；只要样本本身是合法 UTF-8 就按 UTF-8 处理，
-    // 避免 mojibake。真正的 GBK/Big5 中文几乎不可能是合法 UTF-8，不会误伤。
-    let encoding = if guess == UTF_8 || std::str::from_utf8(sample).is_ok() {
-        UTF_8
-    } else {
-        guess
-    };
+    let encoding = detector.guess(None, true);
 
     (decode_with(encoding, bytes), encoding_name(encoding))
+}
+
+/// 取一个**不会把多字节字符切断**的前缀（用于统计检测的样本）
+fn utf8_aligned_prefix(bytes: &[u8], mut end: usize) -> &[u8] {
+    // 0b10xxxxxx 是 UTF-8 续字节：说明 end 落在字符中间，往前退到字符起始
+    while end > 0 && end < bytes.len() && (bytes[end] & 0xC0) == 0x80 {
+        end -= 1;
+    }
+    &bytes[..end]
 }
 
 /// 剥离 BOM 并返回对应编码；无 BOM 返回 None。
@@ -112,6 +124,17 @@ mod tests {
         let (text, enc) = decode_bytes(&bytes);
         assert!(enc == "GBK" || enc == "GB18030", "实际检出: {enc}");
         assert_eq!(text, raw);
+    }
+
+    #[test]
+    fn long_chinese_utf8_not_misdetected() {
+        // 回归：中文 UTF-8 是 3 字节/字，4096 必然切在字符中间。
+        // 旧实现只校验前 4KB 裸切片 → from_utf8 Err → 误判 windows-1252 → 整篇乱码。
+        let s = "系统运维管理平台数据档案".repeat(600); // 21600 字节
+        assert!(s.len() > 4096);
+        let (text, enc) = decode_bytes(s.as_bytes());
+        assert_eq!(enc, "UTF-8", "长中文文本必须识别为 UTF-8，实际: {enc}");
+        assert_eq!(text, s, "内容不得被改写");
     }
 
     #[test]

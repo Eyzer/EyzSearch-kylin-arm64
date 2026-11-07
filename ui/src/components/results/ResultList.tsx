@@ -50,13 +50,39 @@ interface ColFlags {
   hits: boolean
 }
 
-const COL_LABELS: Array<{ key: keyof ColFlags; label: string }> = [
+type ColKey = keyof ColFlags
+
+const COL_LABELS: Array<{ key: ColKey; label: string }> = [
   { key: 'name', label: '名称' },
   { key: 'mtime', label: '修改日期' },
   { key: 'path', label: '路径' },
   { key: 'size', label: '大小' },
   { key: 'hits', label: '命中' },
 ]
+
+/* ------------------------------ 列宽（可拖动） ------------------------------ */
+
+/** 默认列宽（px）。名称列给足够宽度，避免文件名被截断。 */
+const DEFAULT_W: Record<ColKey, number> = { name: 380, mtime: 148, path: 340, size: 88, hits: 64 }
+const MIN_W = 56
+const MAX_W = 900
+const W_STORE = 'eyz.colwidths.v1'
+
+function loadWidths(): Record<ColKey, number> {
+  try {
+    const raw = localStorage.getItem(W_STORE)
+    if (!raw) return { ...DEFAULT_W }
+    const p = JSON.parse(raw) as Partial<Record<ColKey, number>>
+    const out = { ...DEFAULT_W }
+    for (const k of Object.keys(DEFAULT_W) as ColKey[]) {
+      const v = p[k]
+      if (typeof v === 'number' && Number.isFinite(v)) out[k] = Math.max(MIN_W, Math.min(MAX_W, v))
+    }
+    return out
+  } catch {
+    return { ...DEFAULT_W }
+  }
+}
 
 type SortDir = 'asc' | 'desc'
 
@@ -132,6 +158,72 @@ export default function ResultList(props: ResultListProps) {
   const [menu, setMenu] = useState<{ x: number; y: number; targets: string[] } | null>(null)
   const [cols, setCols] = useState<ColFlags>({ name: true, mtime: true, path: true, size: true, hits: true })
   const [colOpen, setColOpen] = useState(false)
+  const [widths, setWidths] = useState<Record<ColKey, number>>(loadWidths)
+
+  /* 列宽持久化（拖动结束才写，避免拖动过程反复写 localStorage） */
+  const widthSaveRef = useRef<number | null>(null)
+
+  function startResize(e: ReactMouseEvent, key: ColKey) {
+    e.preventDefault()
+    e.stopPropagation()
+    const startX = e.clientX
+    const startW = widths[key]
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+
+    const onMove = (ev: globalThis.MouseEvent) => {
+      const w = Math.max(MIN_W, Math.min(MAX_W, startW + (ev.clientX - startX)))
+      setWidths((p) => (p[key] === w ? p : { ...p, [key]: w }))
+    }
+    const onUp = () => {
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      if (widthSaveRef.current !== null) window.clearTimeout(widthSaveRef.current)
+      widthSaveRef.current = window.setTimeout(() => {
+        widthSaveRef.current = null
+        setWidths((cur) => {
+          try {
+            localStorage.setItem(W_STORE, JSON.stringify(cur))
+          } catch {
+            /* 隐私模式等场景忽略 */
+          }
+          return cur
+        })
+      }, 0)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+
+  /** 列宽拖动条（挂在每个表头右缘） */
+  const resizer = (key: ColKey) => (
+    <span
+      className="col-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      title="拖动调整列宽（双击恢复默认）"
+      onMouseDown={(e) => startResize(e, key)}
+      onDoubleClick={(e) => {
+        e.stopPropagation()
+        setWidths((p) => ({ ...p, [key]: DEFAULT_W[key] }))
+      }}
+      onClick={(e) => e.stopPropagation()}
+    />
+  )
+
+  /** colgroup：与表头/单元格同序，保证固定布局下列宽可控 */
+  const colgroup = (
+    <colgroup>
+      {cols.name && <col style={{ width: widths.name }} />}
+      {cols.mtime && <col style={{ width: widths.mtime }} />}
+      {cols.path && <col style={{ width: widths.path }} />}
+      {cols.size && <col style={{ width: widths.size }} />}
+      {cols.hits && <col style={{ width: widths.hits }} />}
+      <col />
+    </colgroup>
+  )
 
   /* 列显隐下拉：点外部 / Esc 关闭 */
   useEffect(() => {
@@ -340,6 +432,7 @@ export default function ResultList(props: ResultListProps) {
       <th className={`th-sort${active ? ' active' : ''}`} onClick={() => clickSort(k)} title={`按${label}排序`}>
         {label}
         <span className="sort-arrow">{active ? (dir === 'asc' ? '▲' : '▼') : ''}</span>
+        {resizer(k)}
       </th>
     )
   }
@@ -356,13 +449,29 @@ export default function ResultList(props: ResultListProps) {
   return (
     <div className="result-list" ref={containerRef} tabIndex={0} onKeyDown={handleKeyDown}>
       <table className="result-table">
+        {colgroup}
         <thead>
           <tr>
             {cols.name && sortTh('名称', 'name')}
             {cols.mtime && sortTh('修改日期', 'mtime')}
-            {cols.path && <th className="th-plain">路径</th>}
-            {cols.size && <th className="th-plain th-size">大小</th>}
-            {cols.hits && <th className="th-plain th-hits">命中</th>}
+            {cols.path && (
+              <th className="th-plain">
+                路径
+                {resizer('path')}
+              </th>
+            )}
+            {cols.size && (
+              <th className="th-plain th-size">
+                大小
+                {resizer('size')}
+              </th>
+            )}
+            {cols.hits && (
+              <th className="th-plain th-hits">
+                命中
+                {resizer('hits')}
+              </th>
+            )}
             <th className="th-plain th-cols">
               <button
                 type="button"
@@ -411,10 +520,14 @@ export default function ResultList(props: ResultListProps) {
                 >
                   {cols.name && (
                     <td className="col-name">
-                      <span className="ftype" data-kind={ftypeKind(ext)}>
-                        {ftypeLabel(ext)}
-                      </span>
-                      <span className="fname">{r.name}</span>
+                      <div className="name-cell">
+                        <span className="ftype" data-kind={ftypeKind(ext)}>
+                          {ftypeLabel(ext)}
+                        </span>
+                        <span className="fname" title={r.name}>
+                          {r.name}
+                        </span>
+                      </div>
                     </td>
                   )}
                   {cols.mtime && <td className="col-mtime">{formatDate(r.mtime)}</td>}

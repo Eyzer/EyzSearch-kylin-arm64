@@ -19,6 +19,7 @@ import type {
   StorageInfo,
 } from '../../types'
 import * as api from '../../api/indexAdmin'
+import * as filesApi from '../../api/files'
 import { errMsg } from '../../util'
 import { useI18n } from '../../i18n'
 import { entryForExt, filterCatalog, SUPPORTED_EXTS } from '../../fileTypeCatalog'
@@ -103,6 +104,7 @@ export default function IndexAdminDialog({ open, onClose, onPausedChange }: Inde
   /* 区块 5：索引构建 */
   const [roots, setRoots] = useState<string[]>([])
   const [newRoot, setNewRoot] = useState('')
+  const [indexTypes, setIndexTypes] = useState<number[]>([])
   const [progress, setProgress] = useState<RebuildProgress | null>(null)
   const [busy, setBusy] = useState(false)
   const [paused, setPaused] = useState(false)
@@ -122,6 +124,8 @@ export default function IndexAdminDialog({ open, onClose, onPausedChange }: Inde
 
   const loadRoots = () => api.listIndexedRoots().then(setRoots)
 
+  const loadIndexTypes = () => api.getIndexTypes().then(setIndexTypes)
+
   /* 打开时初始化；同时订阅索引进度事件 */
   useEffect(() => {
     if (!open) return
@@ -132,8 +136,8 @@ export default function IndexAdminDialog({ open, onClose, onPausedChange }: Inde
     setProgress(null)
     setBusy(false)
     setPaused(false)
-    Promise.all([loadTypes(), loadStorage(), loadSchedule(), loadRoots()]).catch((e: unknown) =>
-      fail(e, '读取配置失败：'),
+    Promise.all([loadTypes(), loadStorage(), loadSchedule(), loadRoots(), loadIndexTypes()]).catch(
+      (e: unknown) => fail(e, '读取配置失败：'),
     )
 
     let un: Unlisten | null = null
@@ -338,7 +342,7 @@ export default function IndexAdminDialog({ open, onClose, onPausedChange }: Inde
 
   const onAddRoot = async () => {
     const dir = newRoot.trim()
-    if (!dir) return fail('请填写要索引的目录')
+    if (!dir) return fail('请填写或选择要索引的目录')
     setBusy(true)
     try {
       const report = await api.indexDirectory(dir, null)
@@ -349,6 +353,53 @@ export default function IndexAdminDialog({ open, onClose, onPausedChange }: Inde
       fail(e, '索引目录失败：')
     } finally {
       setBusy(false)
+    }
+  }
+
+  /** 系统目录选择框（替代手输路径） */
+  const pickDir = async (apply: (p: string) => void) => {
+    try {
+      const p = await filesApi.pickDirectory('选择目录')
+      if (p) apply(p)
+    } catch (e) {
+      fail(e, '打开目录选择框失败：')
+    }
+  }
+
+  /** 移除已索引根目录（连同索引里该目录下的文档） */
+  const onRemoveRoot = (r: string) => {
+    askConfirm(`从索引中移除「${r}」？该目录下已建立的索引文档会一并删除（磁盘文件不动）。`, async () => {
+      try {
+        const n = await api.removeIndexedRoot(r)
+        await loadRoots()
+        await loadStorage()
+        ok(`已移除 ${r}（清理索引文档 ${n} 篇）`)
+      } catch (e) {
+        fail(e, '移除失败：')
+      }
+    })
+  }
+
+  /** 勾选/取消某个索引类型；空集合 = 全部类型 */
+  const onToggleIndexType = async (id: number) => {
+    const next = indexTypes.includes(id) ? indexTypes.filter((x) => x !== id) : [...indexTypes, id]
+    try {
+      await api.setIndexTypes(next)
+      setIndexTypes(next)
+      ok('索引类型已保存，重建索引后生效')
+    } catch (e) {
+      fail(e, '保存索引类型失败：')
+    }
+  }
+
+  /** 切换「全部类型」 */
+  const onAllIndexTypes = async () => {
+    try {
+      await api.setIndexTypes([])
+      setIndexTypes([])
+      ok('已设为全部类型，重建索引后生效')
+    } catch (e) {
+      fail(e, '保存索引类型失败：')
     }
   }
 
@@ -717,10 +768,13 @@ export default function IndexAdminDialog({ open, onClose, onPausedChange }: Inde
                 <div className="idx-add-row">
                   <input
                     className="idx-input grow"
-                    placeholder="迁移目标目录（绝对路径）"
+                    placeholder="迁移目标目录（绝对路径，或点「选择…」）"
                     value={migratePath}
                     onChange={(e) => setMigratePath(e.target.value)}
                   />
+                  <button type="button" className="btn" onClick={() => void pickDir(setMigratePath)}>
+                    选择…
+                  </button>
                   <button type="button" className="btn primary" onClick={onMigrate}>
                     迁移到…
                   </button>
@@ -789,14 +843,54 @@ export default function IndexAdminDialog({ open, onClose, onPausedChange }: Inde
             {section === 'build' && (
               <section className="idx-section">
                 <h3>索引构建</h3>
+
+                <h4 className="idx-sub">索引的文档类型</h4>
+                <div className="idx-type-pick">
+                  <label className="idx-type-item all">
+                    <input
+                      type="checkbox"
+                      checked={indexTypes.length === 0}
+                      onChange={() => void onAllIndexTypes()}
+                    />
+                    <span>全部类型</span>
+                  </label>
+                  {types.map((t) => (
+                    <label key={t.id} className="idx-type-item">
+                      <input
+                        type="checkbox"
+                        checked={indexTypes.length === 0 || indexTypes.includes(t.id)}
+                        disabled={indexTypes.length === 0}
+                        onChange={() => void onToggleIndexType(t.id)}
+                      />
+                      <span>{t.name}</span>
+                      <span className="idx-type-exts">{t.exts.slice(0, 4).join('/')}</span>
+                    </label>
+                  ))}
+                </div>
+                <p className="idx-hint">
+                  默认只索引「常用办公文档」（Word / Excel / PPT / PDF / 纯文本 / Markdown / WPS）。
+                  勾选更多类型后需重建索引才对已有文件生效；类型越多，首次索引越慢。
+                </p>
+
                 <h4 className="idx-sub">已索引根目录</h4>
                 {roots.length === 0 ? (
                   <div className="idx-empty">尚未添加任何根目录</div>
                 ) : (
                   <ul className="idx-roots">
                     {roots.map((r) => (
-                      <li key={r} className="idx-mono">
-                        {r}
+                      <li key={r}>
+                        <span className="idx-mono idx-root-path" title={r}>
+                          {r}
+                        </span>
+                        <button
+                          type="button"
+                          className="idx-root-del"
+                          title="从索引中移除此目录"
+                          disabled={busy}
+                          onClick={() => onRemoveRoot(r)}
+                        >
+                          移除
+                        </button>
                       </li>
                     ))}
                   </ul>
@@ -805,11 +899,19 @@ export default function IndexAdminDialog({ open, onClose, onPausedChange }: Inde
                 <div className="idx-add-row">
                   <input
                     className="idx-input grow"
-                    placeholder="要索引的目录（绝对路径）"
+                    placeholder="要索引的目录（可直接输入，或点「选择…」）"
                     value={newRoot}
                     onChange={(e) => setNewRoot(e.target.value)}
                     disabled={busy}
                   />
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={busy}
+                    onClick={() => void pickDir(setNewRoot)}
+                  >
+                    选择…
+                  </button>
                   <button
                     type="button"
                     className="btn primary"

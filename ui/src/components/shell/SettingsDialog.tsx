@@ -42,6 +42,8 @@ export default function SettingsDialog({ open, onClose }: SettingsDialogProps) {
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
   const [updateMsg, setUpdateMsg] = useState('')
+  /** OCR helper 是否就位（false 时给出「开关无效」提示） */
+  const [ocrReady, setOcrReady] = useState(true)
 
   /** 检测更新（7.9 / B6）：有更新 → confirm → 下载安装（自动重启） */
   async function onCheckUpdate() {
@@ -80,6 +82,11 @@ export default function SettingsDialog({ open, onClose }: SettingsDialogProps) {
       .getAppConfig()
       .then(setCfg)
       .catch((e: unknown) => setFeedback({ kind: 'err', msg: `读取配置失败：${errMsg(e)}` }))
+    // OCR helper 是否就位：开关打开但 helper 缺失时，扫描件依然识别不出内容
+    void api
+      .ocrStatus()
+      .then((s) => setOcrReady(s.helperReady))
+      .catch(() => setOcrReady(false))
   }, [open])
 
   /* Escape 关闭 */
@@ -199,7 +206,7 @@ export default function SettingsDialog({ open, onClose }: SettingsDialogProps) {
                     checked={cfg.autostart}
                     onChange={(e) => patch({ autostart: e.target.checked })}
                   />
-                  <span>开机时自动启动 search-tool</span>
+                  <span>开机时自动启动 EyzSearch</span>
                 </label>
                 <label className="switch-row">
                   <input
@@ -217,6 +224,27 @@ export default function SettingsDialog({ open, onClose }: SettingsDialogProps) {
                   />
                   <span>右击目录搜索（文件管理器右键启动，保存后写入系统集成）</span>
                 </label>
+              </section>
+
+              <section className="settings-section">
+                <h3>文档识别</h3>
+                <label className="switch-row">
+                  <input
+                    type="checkbox"
+                    checked={cfg.ocrEnabled}
+                    onChange={(e) => patch({ ocrEnabled: e.target.checked })}
+                  />
+                  <span>启用 OCR 识别（图片与扫描型 PDF）</span>
+                </label>
+                <p className="settings-hint">
+                  默认关闭。开启后，没有文字层的扫描件与图片才会被识别成可检索文字；
+                  代价是这类文件的索引耗时明显增加（逐页识别）。改完保存后，需重建索引才对已有文件生效。
+                </p>
+                {cfg.ocrEnabled && !ocrReady && (
+                  <p className="settings-hint">
+                    未在当前安装包内找到 OCR 组件，开关打开也不会有识别结果。
+                  </p>
+                )}
               </section>
 
               <section className="settings-section">

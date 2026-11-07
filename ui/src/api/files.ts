@@ -2,7 +2,7 @@
  * 子项 2：结果交互与文件操作 —— 前端 invoke 封装
  * 所有权：子项 2 agent（其他子项勿改）
  */
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/tauri'
 import type { ExportRequest, FileOpResult } from '../types'
 
 /** 用系统默认程序打开文件 */
@@ -51,4 +51,9 @@ export function transferFiles(
 /** 导出结果为 xlsx，返回落盘绝对路径 */
 export function exportXlsx(req: ExportRequest): Promise<string> {
   return invoke<string>('export_xlsx', { req })
+}
+
+/** 系统目录选择框；用户取消返回 null */
+export function pickDirectory(title?: string): Promise<string | null> {
+  return invoke<string | null>('pick_directory', { title: title ?? null })
 }

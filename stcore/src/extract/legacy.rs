@@ -23,6 +23,10 @@ fn format_of(ext: &str) -> Option<anydoc::Format> {
         "doc" | "dot" => Format::Doc,
         "xls" | "xlsb" | "xlt" => Format::Excel,
         "ppt" | "pps" | "pot" => Format::Ppt,
+        // WPS 原生二进制：按对应的 MS 旧格式解析（WPS 的 OLE 容器与 doc/xls/ppt 高度同构）
+        "wps" | "wpt" => Format::Doc,
+        "et" | "ett" => Format::Excel,
+        "dps" | "dpt" => Format::Ppt,
         "odt" => Format::Odt,
         "ods" => Format::Ods,
         "odp" => Format::Odp,
@@ -52,13 +56,39 @@ pub fn legacy_to_text(ext: &str, bytes: &[u8]) -> Result<String, ExtractError> {
     let Some(format) = format_of(ext) else {
         return Err(ExtractError::Unsupported(format!("非旧格式扩展名: {ext}")));
     };
-    let md = anydoc::to_markdown_bytes(bytes, format).map_err(map_err)?;
-    if md.trim().is_empty() {
-        return Err(ExtractError::Unsupported(
-            "文档无可提取正文（可能为空文档或纯图片）".to_string(),
-        ));
+    let is_wps = matches!(ext, "wps" | "wpt" | "et" | "ett" | "dps" | "dpt");
+    match anydoc::to_markdown_bytes(bytes, format).map_err(map_err) {
+        Ok(md) if !md.trim().is_empty() => Ok(md),
+        Ok(_) => {
+            if is_wps {
+                wps_strings_fallback(ext, bytes)
+            } else {
+                Err(ExtractError::Unsupported(
+                    "文档无可提取正文（可能为空文档或纯图片）".to_string(),
+                ))
+            }
+        }
+        Err(e) => {
+            if is_wps {
+                // WPS 私有 OLE 若 anydoc 不认识，退回 strings 抽取，避免整篇被跳过
+                wps_strings_fallback(ext, bytes).map_err(|_| e)
+            } else {
+                Err(e)
+            }
+        }
     }
-    Ok(md)
+}
+
+/// WPS 原生二进制兜底：从容器中抽取可读字符串（ASCII + UTF-16LE 中文），
+/// 让 .wps/.et/.dps 至少能被索引与命中，而不是整篇丢弃。
+fn wps_strings_fallback(ext: &str, bytes: &[u8]) -> Result<String, ExtractError> {
+    let t = super::binary::strings_to_text(bytes);
+    if t.trim().is_empty() {
+        return Err(ExtractError::Unsupported(format!(
+            "WPS 文档无法解析出正文: {ext}"
+        )));
+    }
+    Ok(t)
 }
 
 #[cfg(test)]

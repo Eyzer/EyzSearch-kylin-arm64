@@ -88,19 +88,11 @@
   font-size: 9px;
 }
 .result-table thead th.th-hits {
-  width: 46px;
   text-align: center;
 }
 
-/* 列宽 */
-.result-table td.col-name {
-  width: 38%;
-}
-.result-table td.col-mtime {
-  width: 20%;
-}
+/* 列宽由 <colgroup> 控制（可拖动）；此处只保留对齐与溢出行为 */
 .result-table td.col-hits {
-  width: 46px;
   text-align: center;
 }
 
@@ -128,14 +120,47 @@
 }
 
 .result-row td.col-name {
+  padding-left: 6px;
+}
+
+/* 名称单元格：内部 flex 容器（td 保持 table-cell，宽度才受 colgroup 约束） */
+.name-cell {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  width: 100%;
 }
+
 .result-row .fname {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* 列宽拖动条 */
+.col-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+.col-resizer::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  right: 2px;
+  width: 1px;
+  background: transparent;
+}
+.col-resizer:hover::after {
+  background: var(--c-accent);
 }
 
 .col-mtime,
@@ -302,11 +327,7 @@
   text-align: center;
   position: relative;
 }
-.th-size {
-  width: 76px;
-}
 .result-table td.col-size {
-  width: 76px;
   color: var(--c-text-dim);
 }
 

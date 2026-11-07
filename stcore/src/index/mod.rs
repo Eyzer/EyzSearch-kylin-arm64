@@ -13,7 +13,9 @@
 //!     reader 以 `ReloadPolicy::OnCommitWithDelay` 构建（tantivy 0.26 无 `OnCommit`
 //!     变体；该策略监听 meta.json，外部 writer commit 后毫秒级自动 reload）
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use serde::{Deserialize, Serialize};
 use tantivy::schema::{
     Field, IndexRecordOption, OwnedValue, Schema, Value as _, FAST, INDEXED, STORED, STRING, TEXT,
 };
@@ -71,6 +73,14 @@ impl Tokenizer for SegIndexTokenizer {
                 position_length: 1,
             })
             .collect();
+        if std::env::var_os("ST_SEG_DEBUG").is_some() {
+            eprintln!(
+                "[seg-debug] 输入 {} 字节 → {} token（首三个: {:?}）",
+                text.len(),
+                tokens.len(),
+                tokens.iter().take(3).map(|t| t.text.as_str()).collect::<Vec<_>>()
+            );
+        }
         BoxTokenStream::new(VecTokenStream {
             tokens,
             index: 0,
@@ -97,7 +107,9 @@ pub struct IndexDoc {
 /// - v2：新增 `pinyin` 字段（拼音检索通道，P3-C）
 /// - v3：`size`/`mtime` 由 STORED 升级为 `INDEXED|FAST|STORED`
 ///   （RangeQuery 时间/大小筛选与排序必需，架构 v2 D7；上线需一次全量重建）
-pub const SCHEMA_VERSION: u32 = 3;
+/// - v4：`pinyin` 字段索引选项由 `WithFreqsAndPositions` 降为 `WithFreqs`
+///   （拼音只做 token AND，不存词位置；体积与写入时间显著下降。上线需一次全量重建）
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// meta.json 中记录 schema 版本的键（tantivy 自身不识别该键，读时忽略）
 const SCHEMA_VERSION_KEY: &str = "stcore_schema_version";
@@ -116,16 +128,26 @@ struct SchemaFields {
 
 fn build_schema() -> Schema {
     let mut sb = Schema::builder();
-    let indexing = || {
+    // 正文/标题：需要词位置（短语查询与命中定位）
+    let with_positions = || {
         TEXT.set_indexing_options(
             tantivy::schema::TextFieldIndexing::default()
                 .set_tokenizer("seg")
                 .set_index_option(IndexRecordOption::WithFreqsAndPositions),
         )
     };
-    let text_stored = indexing().set_stored();
+    // 拼音：只做 token AND（`renmin` → `人民`），不需要词位置。
+    // 拼音串长度约为正文 2～3 倍，不存 positions 能省下可观的索引体积与写入时间。
+    let freqs_only = || {
+        TEXT.set_indexing_options(
+            tantivy::schema::TextFieldIndexing::default()
+                .set_tokenizer("seg")
+                .set_index_option(IndexRecordOption::WithFreqs),
+        )
+    };
+    let text_stored = with_positions().set_stored();
     // 拼音字段只索引不存储：拼音串体积约为正文的数倍，存下来无检索价值
-    let text_plain = indexing();
+    let text_plain = freqs_only();
     sb.add_text_field("path", STRING | STORED);
     sb.add_text_field("title", text_stored.clone());
     sb.add_text_field("body", text_stored);
@@ -147,6 +169,87 @@ fn fields_of(index: &Index) -> anyhow::Result<SchemaFields> {
         f_mtime: index.schema().get_field("mtime")?,
         f_ext: index.schema().get_field("ext")?,
     })
+}
+
+/* ------------------------------- 增量清单 ------------------------------- */
+
+/// 增量清单文件名（与 tantivy 的 meta.json 并列，放在索引目录根下）
+pub const MANIFEST_FILE: &str = "stmanifest.json";
+
+/// 单篇文档的变更指纹（size + mtime）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocMeta {
+    pub size: i64,
+    pub mtime: i64,
+}
+
+/// 增量清单：`path → (size, mtime)`
+///
+/// ## 为什么单独存一份而不是从索引里读
+/// tantivy 的 stored 字段按行压缩，想拿到某篇文档的 path 必须解压整行（含 body）。
+/// 「判断哪些文件没变」若逐文档读 stored，等于把所有正文再读一遍——和重新提取一样慢。
+/// 所以另存一份轻量清单，让增量重建只碰这个小文件。
+///
+/// ## 失效策略
+/// 清单里记着 schema 版本；与当前 `SCHEMA_VERSION` 不符时整体作废（退回全量重建），
+/// 避免索引结构变更后拿着旧指纹跳过文件、导致新字段为空。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Manifest {
+    #[serde(default)]
+    pub schema: u32,
+    #[serde(default)]
+    pub docs: BTreeMap<String, DocMeta>,
+}
+
+impl Default for Manifest {
+    fn default() -> Self {
+        Self {
+            schema: SCHEMA_VERSION,
+            docs: BTreeMap::new(),
+        }
+    }
+}
+
+impl Manifest {
+    /// 读取清单；文件不存在 / 解析失败 / schema 版本不符 → 返回空清单（等价全量）
+    pub fn load(dir: &Path) -> Self {
+        let Ok(s) = std::fs::read_to_string(dir.join(MANIFEST_FILE)) else {
+            return Self::default();
+        };
+        match serde_json::from_str::<Manifest>(&s) {
+            Ok(m) if m.schema == SCHEMA_VERSION => m,
+            _ => Self::default(),
+        }
+    }
+
+    /// 原子落盘（临时文件 + rename），断电不会留下半截清单
+    pub fn save(&self, dir: &Path) -> anyhow::Result<()> {
+        let p = dir.join(MANIFEST_FILE);
+        let tmp = dir.join(format!("{MANIFEST_FILE}.tmp"));
+        std::fs::write(&tmp, serde_json::to_string(self)?)?;
+        std::fs::rename(&tmp, &p)?;
+        Ok(())
+    }
+
+    pub fn get(&self, path: &str) -> Option<DocMeta> {
+        self.docs.get(path).copied()
+    }
+
+    /// 该文件相对清单是否**未变更**（size 与 mtime 都一致）
+    pub fn unchanged(&self, path: &str, size: u64, mtime: i64) -> bool {
+        matches!(
+            self.docs.get(path),
+            Some(m) if m.size == size as i64 && m.mtime == mtime
+        )
+    }
+
+    pub fn len(&self) -> usize {
+        self.docs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.docs.is_empty()
+    }
 }
 
 /// 打开（或创建）索引目录：schema 版本校验 + tokenizer 注册（读写两侧共用）
@@ -178,6 +281,11 @@ pub struct Writer {
     /// 索引目录（commit 后回写 schema 版本号用）
     dir: PathBuf,
     writer: Option<IndexWriter>,
+    /// 本次会话的变更集：`Some(meta)` = 已写入，`None` = 已删除。
+    /// commit 时统一合并进增量清单，避免每篇文档都读写一次清单文件。
+    pending: HashMap<String, Option<DocMeta>>,
+    /// 批量导入期是否跳过逐文档 delete_term（索引为空时纯属浪费）
+    skip_delete_term: bool,
 }
 
 impl Writer {
@@ -190,43 +298,86 @@ impl Writer {
             fields,
             dir: dir.to_path_buf(),
             writer: None,
+            pending: HashMap::new(),
+            skip_delete_term: false,
         })
     }
 
-    /// 获取 writer（50MB 堆，够 P0；批量导入时足够）
+    /// 读取增量清单（indexer 做差异比对用；与写侧无锁竞争，只读文件）
+    pub fn manifest(&self) -> Manifest {
+        Manifest::load(&self.dir)
+    }
+
+    /// 批量导入模式：跳过逐文档 `delete_term`。
+    ///
+    /// 适用场景：全新索引（`clear()` 之后）或首次全量重建——此时不存在同 path 的旧文档，
+    /// `delete_term` 只会往段里写一堆删除位，commit 时还要再扫一遍。
+    pub fn set_skip_delete_term(&mut self, skip: bool) {
+        self.skip_delete_term = skip;
+    }
+
+    /// 获取 writer（内存预算按机器内存自适应，见 `writer_budget`）
+    ///
+    /// 多工作线程：tantivy 每个写入线程各建自己的 segment，天然并行。
+    /// 旧版固定单线程，飞腾 8 核在写入侧只用了 1 核——这是纯文本库
+    /// 全量重建慢的主因之一。线程数见 `writer_threads`，总内存预算不变
+    /// （平分到各线程），不会因为多线程吃更多内存。
     fn writer(&mut self) -> anyhow::Result<&mut IndexWriter> {
         if self.writer.is_none() {
-            self.writer = Some(self.index.writer(50_000_000)?);
+            let budget = writer_budget();
+            let threads = writer_threads();
+            self.writer = Some(self.index.writer_with_num_threads(threads, budget)?);
         }
         Ok(self.writer.as_mut().unwrap())
     }
 
-    /// 写入/更新一篇文档（按 path 先删后建，保证幂等）
+    /// 写入/更新一篇文档（按 path 先删后建，保证幂等）。
+    ///
+    /// 拼音串在这里现算——**只适合小批量或测试**。
+    /// 批量索引请走 [`Writer::upsert_with_pinyin`]，在提取线程里并行算好，
+    /// 否则所有文档都要排在这条唯一的串行通道上等拼音转换。
     pub fn upsert(&mut self, doc: &IndexDoc) -> anyhow::Result<()> {
+        let mut py = crate::pinyin::text_to_pinyin_text(&doc.title);
+        let py_body = crate::pinyin::text_to_pinyin_text(&doc.body);
+        if !py_body.is_empty() {
+            py.push(' ');
+            py.push_str(&py_body);
+        }
+        self.upsert_with_pinyin(doc, &py)
+    }
+
+    /// 写入/更新一篇文档，拼音串由调用方提供。
+    ///
+    /// 这是索引管线的热路径：提取线程并行算好拼音，写入端只做 IO，
+    /// 串行段里不再有 CPU 密集计算。
+    pub fn upsert_with_pinyin(&mut self, doc: &IndexDoc, pinyin: &str) -> anyhow::Result<()> {
         let f_path = self.fields.f_path;
         let ext = Path::new(&doc.path)
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        // 拼音通道：标题与正文的汉字转无声调拼音连写串（供 "renmin" → "人民"）
-        let pinyin_text = {
-            let mut s = crate::pinyin::text_to_pinyin_text(&doc.title);
-            s.push(' ');
-            s.push_str(&crate::pinyin::text_to_pinyin_text(&doc.body));
-            s
-        };
         // 手工构造文档（tantivy::doc! 宏在 lib 目标下路径解析有坑，直接 add_field_value）
         let mut d = TantivyDocument::default();
         d.add_field_value(f_path, &doc.path);
         d.add_field_value(self.fields.f_title, &doc.title);
         d.add_field_value(self.fields.f_body, &doc.body);
-        d.add_field_value(self.fields.f_pinyin, &pinyin_text);
+        d.add_field_value(self.fields.f_pinyin, pinyin);
         d.add_field_value(self.fields.f_size, &OwnedValue::I64(doc.size as i64));
         d.add_field_value(self.fields.f_mtime, &OwnedValue::I64(doc.mtime));
         d.add_field_value(self.fields.f_ext, &ext);
+        let skip_del = self.skip_delete_term;
         let w = self.writer()?;
-        w.delete_term(tantivy::Term::from_field_text(f_path, &doc.path));
+        if !skip_del {
+            w.delete_term(tantivy::Term::from_field_text(f_path, &doc.path));
+        }
         w.add_document(d)?;
+        self.pending.insert(
+            doc.path.clone(),
+            Some(DocMeta {
+                size: doc.size as i64,
+                mtime: doc.mtime,
+            }),
+        );
         Ok(())
     }
 
@@ -234,22 +385,157 @@ impl Writer {
     pub fn delete(&mut self, path: &str) -> anyhow::Result<()> {
         let term = tantivy::Term::from_field_text(self.fields.f_path, path);
         self.writer()?.delete_term(term);
+        self.pending.insert(path.to_string(), None);
         Ok(())
     }
 
+    /// 提交并落盘增量清单（一次 merge + 一次写清单，开销摊到整批）
     pub fn commit(&mut self) -> anyhow::Result<()> {
         if let Some(w) = self.writer.as_mut() {
             w.commit()?;
         }
         // tantivy 每次 commit 都会覆写 meta.json（丢失自定义键），需回写版本号
         persist_schema_version(&self.dir)?;
+        // 清单与本批写入同步落盘：中途崩溃最多丢掉本批指纹（下次重算这几篇，不会漏）
+        if !self.pending.is_empty() {
+            let mut m = Manifest::load(&self.dir);
+            m.schema = SCHEMA_VERSION;
+            for (k, v) in self.pending.drain() {
+                match v {
+                    Some(meta) => {
+                        m.docs.insert(k, meta);
+                    }
+                    None => {
+                        m.docs.remove(&k);
+                    }
+                }
+            }
+            m.save(&self.dir)?;
+        }
         Ok(())
     }
 
-    /// 清空索引（重建用）
+    /// 清空索引（重建用）：一并作废增量清单
     pub fn clear(&mut self) -> anyhow::Result<()> {
         self.writer()?.delete_all_documents()?;
-        self.commit()
+        self.pending.clear();
+        self.commit()?;
+        let _ = std::fs::remove_file(self.dir.join(MANIFEST_FILE));
+        Ok(())
+    }
+}
+
+/// 影子索引子目录名（全量重建时先写这里，写完再整体替换）
+pub const SHADOW_DIR: &str = ".rebuild";
+
+/// 把影子索引里的 tantivy 数据替换到主目录（Recoll `-Z` 就地重建思路的加强版）。
+///
+/// 为什么需要它：旧做法是全量重建前先把索引删光，用户在几十秒到几分钟内
+/// 一条都搜不到。现在新索引在 `.rebuild` 里独立建好，旧索引全程可用，
+/// 只在最后这一步做毫秒级的文件替换。
+///
+/// 替换窗口极短（同分区 rename），期间搜索可能报一次「索引不存在」，
+/// 调用方在重建结束后会重开索引，用户无感。
+pub fn promote_shadow(dir: &Path) -> anyhow::Result<()> {
+    let shadow = dir.join(SHADOW_DIR);
+    if !shadow.is_dir() {
+        return Ok(());
+    }
+    // 1) 清掉主目录旧索引数据（配置文件、历史库、提取缓存都保留）
+    reset_index_data(dir)?;
+    // 2) 影子文件搬进主目录。同分区 rename 是原子的；跨分区（极端情况）退化为复制。
+    for entry in std::fs::read_dir(&shadow)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dir.join(entry.file_name());
+        if std::fs::rename(&from, &to).is_err() {
+            std::fs::copy(&from, &to)?;
+            let _ = std::fs::remove_file(&from);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&shadow);
+    Ok(())
+}
+
+/// 清理影子目录里上次中断留下的残渣
+pub fn reset_shadow(dir: &Path) -> anyhow::Result<PathBuf> {
+    let shadow = dir.join(SHADOW_DIR);
+    if shadow.exists() {
+        std::fs::remove_dir_all(&shadow)?;
+    }
+    std::fs::create_dir_all(&shadow)?;
+    Ok(shadow)
+}
+
+/// 重建前清空索引目录（**保留用户配置与历史库**）。
+///
+/// 用途：schema 版本升级后旧索引无法打开，而这次无论如何都要全量重建——
+/// 与其让用户自己找目录删文件，不如自动清掉 tantivy 数据文件后重来。
+///
+/// 保留：`config.json` / `app.json` / `synonyms.json` / 任意 `*.db`（搜索历史与书签）。
+pub fn reset_index_data(dir: &Path) -> anyhow::Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        // `.rebuild` 必须保留：promote_shadow 正是靠「先 reset 主目录、再把影子搬进来」
+        // 完成切换，把它一起删掉就等于把刚建好的新索引扔了。
+        let keep = matches!(name.as_str(), "config.json" | "app.json" | "synonyms.json")
+            || name == SHADOW_DIR
+            || name.ends_with(".db");
+        if keep {
+            continue;
+        }
+        let p = entry.path();
+        if p.is_dir() {
+            std::fs::remove_dir_all(&p)?;
+        } else {
+            std::fs::remove_file(&p)?;
+        }
+    }
+    Ok(())
+}
+
+/// 写侧内存预算：按机器内存自适应。
+///
+/// 预算过小 → 段多 → 后台合并频繁 → 索引与检索都慢（旧版固定 50MB）。
+/// 取物理内存的 1/16，夹在 [128MB, 1GB]：4GB 机器给 256MB，8GB 给 512MB。
+fn writer_budget() -> usize {
+    const MIN: usize = 128 * 1024 * 1024;
+    const MAX: usize = 1024 * 1024 * 1024;
+    let total = total_memory_bytes().unwrap_or(2 * 1024 * 1024 * 1024);
+    (total / 16).clamp(MIN, MAX)
+}
+
+/// 写侧工作线程数。
+///
+/// 取 CPU 核数，封顶 4：再多收益递减，且合并线程也要占核。
+/// 单核/双核机器退化为 1–2，行为与旧版一致。
+fn writer_threads() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|v| v.get())
+        .unwrap_or(1);
+    cores.clamp(1, 4)
+}
+
+/// 读物理内存总量（Linux 读 /proc/meminfo；其它平台返回 None 走兜底）
+fn total_memory_bytes() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                let kb: usize = rest.trim().trim_end_matches("kB").trim().parse().ok()?;
+                return Some(kb * 1024);
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
     }
 }
 

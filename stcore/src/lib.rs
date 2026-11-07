@@ -13,6 +13,7 @@
 //!   schedule.rs 定时更新三态调度（子项 3）
 //!   watch.rs  文件监听实时更新
 
+pub mod cache;
 pub mod config;
 pub mod dsl;
 pub mod extract;

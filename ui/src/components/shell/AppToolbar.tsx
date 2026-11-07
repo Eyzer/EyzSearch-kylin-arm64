@@ -29,18 +29,23 @@ interface ToolBtn {
   sepBefore?: boolean
 }
 
-/** 图标组定义（顺序严格照 image3 / 任务卡） */
+/** 图标组定义（顺序严格照 image3 / 任务卡）
+ *
+ * 字形只用 BMP 内的几何/箭头符号：麒麟的 webkit2gtk 里没装彩色 emoji 字体，
+ * 原来的 🎨 / 🗑 会渲染成空白或豆腐块（表现为「按钮不显示」）。
+ * ◐ = 明暗切换，⌫ = 删除，字体覆盖都稳。
+ */
 const BUTTONS: ToolBtn[] = [
   { glyph: '←', title: '后退', action: 'nav.back', nav: 'back' },
   { glyph: '→', title: '前进', action: 'nav.forward', nav: 'forward' },
   { glyph: '▼', title: '暂停 / 继续索引', action: 'index.togglePause' },
   { glyph: '↻', title: '刷新', action: 'nav.refresh' },
   { glyph: '✕', title: '清除结果', action: 'nav.clear' },
-  { glyph: '🗑', title: '删除到回收站', action: 'edit.trash', sepBefore: true },
+  { glyph: '⌫', title: '删除到回收站', action: 'edit.trash', sepBefore: true },
   { glyph: '⚙', title: '选项设置', action: 'settings.options', sepBefore: true },
   { glyph: '↑', title: '上级目录', action: 'nav.up' },
-  { glyph: '🎨', title: '切换皮肤', action: 'view.palette', sepBefore: true },
-  { glyph: 'ℹ', title: '关于 search-tool', action: 'help.info' },
+  { glyph: '◐', title: '切换皮肤（明 / 暗）', action: 'view.palette', sepBefore: true },
+  { glyph: 'ℹ', title: '关于 EyzSearch', action: 'help.info' },
   { glyph: '?', title: '帮助 / 主页', action: 'help.homepage' },
 ]
 

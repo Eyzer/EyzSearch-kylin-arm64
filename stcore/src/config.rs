@@ -80,6 +80,12 @@ impl Default for ScheduleConfig {
     }
 }
 
+/// 默认参与索引的文件类型 id：「常用办公文档」。
+///
+/// 索引默认只收办公文档（Word/Excel/PPT/PDF/纯文本/Markdown/WPS），
+/// 代码、二进制、图片等按需在「索引管理 → 索引构建」里勾选后再纳入。
+pub const DEFAULT_INDEX_TYPE_ID: i64 = 13;
+
 /// 全局配置（config.json 顶层结构）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,6 +99,12 @@ pub struct Config {
     /// 已索引根目录（"指定目录"下拉数据源）
     #[serde(default)]
     pub indexed_roots: Vec<String>,
+    /// 参与索引的文件类型 id 集合。
+    ///
+    /// `None` = 旧配置（字段缺失）→ 按 [`DEFAULT_INDEX_TYPE_ID`] 处理；
+    /// `Some(vec![])` = 用户选择「全部类型」。
+    #[serde(default)]
+    pub index_types: Option<Vec<i64>>,
     /// 自增主键分配器
     #[serde(default)]
     pub next_id: i64,
@@ -107,6 +119,7 @@ impl Default for Config {
             dir_rules: Vec::new(),
             schedule: ScheduleConfig::default(),
             indexed_roots: Vec::new(),
+            index_types: Some(vec![DEFAULT_INDEX_TYPE_ID]),
         }
     }
 }
@@ -126,7 +139,8 @@ pub fn builtin_types() -> Vec<FileType> {
             3,
             "Office 文档",
             &[
-                "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "tsv", "rtf",
+                "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "tsv", "rtf", "wps", "wpt",
+                "et", "ett", "dps", "dpt",
             ],
         ),
         mk(4, "PDF", &["pdf"]),
@@ -161,12 +175,22 @@ pub fn builtin_types() -> Vec<FileType> {
             11,
             "旧格式",
             &[
-                "doc", "dot", "xls", "xlsb", "xlt", "ppt", "pps", "pot", "odt", "ods", "odp", "rtf",
+                "doc", "dot", "xls", "xlsb", "xlt", "ppt", "pps", "pot", "odt", "ods", "odp",
+                "rtf", "wps", "wpt", "et", "ett", "dps", "dpt",
             ],
         ),
         // 二进制可执行/库文件：strings 提取（R4；ASCII ≥5 + UTF-16LE，256KB 截断）
         // 不含 bin：bin 是 static_ext 的兜底标签，语义上不是确定格式
         mk(12, "二进制", &["exe", "dll", "so", "dylib"]),
+        // 默认索引类型：只覆盖日常办公文档，避免一上来就把代码/二进制/图片全扫一遍
+        mk(
+            13,
+            "常用办公文档",
+            &[
+                "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf", "txt", "md", "rtf", "csv",
+                "wps", "wpt", "et", "ett", "dps", "dpt",
+            ],
+        ),
     ]
 }
 
@@ -184,9 +208,20 @@ impl Config {
         }
         let raw = std::fs::read_to_string(&p)?;
         let mut cfg: Config = serde_json::from_str(&raw)?;
-        // 新版本新增的内置类型补种（不覆盖用户已有项）
+        // 新版本新增的内置类型补种 + 既有内置类型的扩展名补齐
+        // （只增不删，不覆盖用户手工增删的自定义类型；用于让老索引目录也能识别新格式，如 WPS）
         for bt in builtin_types() {
-            if !cfg.file_types.iter().any(|t| t.id == bt.id) {
+            if let Some(pos) = cfg.file_types.iter().position(|t| t.id == bt.id) {
+                for e in &bt.exts {
+                    if !cfg.file_types[pos]
+                        .exts
+                        .iter()
+                        .any(|x| x.eq_ignore_ascii_case(e))
+                    {
+                        cfg.file_types[pos].exts.push(e.clone());
+                    }
+                }
+            } else {
                 cfg.file_types.push(bt);
             }
         }
@@ -233,6 +268,40 @@ impl Config {
         v
     }
 
+    /// 实际参与索引的类型 id 集合（`None` → 默认「常用办公文档」）
+    pub fn index_type_ids(&self) -> Vec<i64> {
+        match &self.index_types {
+            Some(v) if !v.is_empty() => v.clone(),
+            Some(_) => Vec::new(), // 显式「全部类型」
+            None => vec![DEFAULT_INDEX_TYPE_ID],
+        }
+    }
+
+    /// 实际参与索引的扩展名集合（索引遍历的唯一判据）。
+    ///
+    /// - `index_types` 为 `Some(vec![])`（用户全选）→ 全部类型
+    /// - 否则取所选类型的扩展名并集
+    pub fn index_exts(&self) -> Vec<String> {
+        let ids = self.index_type_ids();
+        let mut v: Vec<String> = if ids.is_empty() {
+            self.all_exts()
+        } else {
+            self.file_types
+                .iter()
+                .filter(|t| ids.contains(&t.id))
+                .flat_map(|t| t.exts.iter().cloned())
+                .collect()
+        };
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// 设置参与索引的类型（空 vec = 全部类型）
+    pub fn set_index_types(&mut self, ids: Vec<i64>) {
+        self.index_types = Some(ids);
+    }
+
     /* ---------------------- 类型表 CRUD ---------------------- */
 
     pub fn add_type(&mut self, name: impl Into<String>, exts: Vec<String>) -> FileType {
@@ -248,6 +317,12 @@ impl Config {
             builtin: false,
         };
         self.file_types.push(ft.clone());
+        // 手动新增的类型默认纳入索引范围（否则用户建了类型却扫不到文件）
+        let mut ids = self.index_type_ids();
+        if !ids.is_empty() && !ids.contains(&id) {
+            ids.push(id);
+            self.index_types = Some(ids);
+        }
         ft
     }
 

@@ -33,13 +33,28 @@ fn floor_char_boundary(s: &str, mut cut: usize) -> usize {
     cut
 }
 
+/// 文本是否含**需要转拼音**的字符（任一非 ASCII 字节即视为需要）。
+///
+/// 用途：纯 ASCII 文本（英文、代码、日志）的拼音串就是原文小写化本身，
+/// 而原文已由 body 字段索引，pinyin 字段对它完全冗余。
+/// 按字节扫一遍就返回，比逐字转拼音便宜两个数量级。
+#[inline]
+pub fn needs_pinyin(text: &str) -> bool {
+    text.as_bytes().iter().any(|&b| b >= 0x80)
+}
+
 /// 文本 → 拼音文本（汉字转无声调拼音"连写"，非汉字作为词边界）
 ///
 /// 例：`人民 共和国` → `renmin gongheguo`；`AI 时代` → `ai shidai`
 /// （ASCII 字母数字原样保留，从而支持中英混排词）
 ///
 /// 超 [`PINYIN_SOURCE_LIMIT`] 的输入只取前段（见常量说明）。
+///
+/// **纯 ASCII 输入返回空串**：内容已由 body 字段覆盖，拼音通道不需要它。
 pub fn text_to_pinyin_text(text: &str) -> String {
+    if !needs_pinyin(text) {
+        return String::new();
+    }
     let text = if text.len() > PINYIN_SOURCE_LIMIT {
         &text[..floor_char_boundary(text, PINYIN_SOURCE_LIMIT)]
     } else {

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use tauri::{Emitter, Manager, State};
+use tauri::{Manager, State};
 
 use crate::commands::dto::{IndexStats, StorageInfo};
 use crate::indexer_queue::{self, IndexTask};
@@ -94,7 +94,7 @@ fn human_size(bytes: u64) -> String {
 
 /// 上报索引进度（`index-progress` 事件，契约见 types.ts RebuildProgress）
 fn emit_progress(app: &tauri::AppHandle, p: &ScanProgress) {
-    let _ = app.emit(
+    let _ = app.emit_all(
         "index-progress",
         serde_json::json!({ "done": p.done, "total": p.total, "current": p.current, "phase": "indexing" }),
     );
@@ -102,7 +102,7 @@ fn emit_progress(app: &tauri::AppHandle, p: &ScanProgress) {
 
 /// 结束态：`current` 置空，前端据此收尾（清进度条/刷新统计）
 fn emit_done(app: &tauri::AppHandle) {
-    let _ = app.emit(
+    let _ = app.emit_all(
         "index-progress",
         serde_json::json!({ "done": 0, "total": 0, "current": "" }),
     );
@@ -111,7 +111,7 @@ fn emit_done(app: &tauri::AppHandle) {
 /// 跳过态通知（`phase="skipped"`）：定时索引被重建/手动索引占用或读配置失败时发送，
 /// 前端据此提示"本次定时更新已跳过"，替代原先的静默 return。
 fn emit_skipped(app: &tauri::AppHandle) {
-    let _ = app.emit(
+    let _ = app.emit_all(
         "index-progress",
         serde_json::json!({ "done": 0, "total": 0, "current": "", "phase": "skipped" }),
     );
@@ -194,6 +194,65 @@ pub fn remove_dir_rule(id: i64, state: State<'_, AppState>) -> Result<(), String
 #[tauri::command]
 pub fn list_indexed_roots(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     Ok(load_cfg(&state)?.indexed_roots)
+}
+
+/// 参与索引的文件类型 id 集合（空数组 = 全部类型）
+#[tauri::command]
+pub fn get_index_types(state: State<'_, AppState>) -> Result<Vec<i64>, String> {
+    Ok(load_cfg(&state)?.index_type_ids())
+}
+
+/// 设置参与索引的文件类型（空数组 = 全部类型）；下次索引/重建生效
+#[tauri::command]
+pub fn set_index_types(ids: Vec<i64>, state: State<'_, AppState>) -> Result<(), String> {
+    let mut cfg = load_cfg(&state)?;
+    cfg.set_index_types(ids);
+    save_cfg(&state, &cfg)
+}
+
+/// 移除已索引根目录：同时删掉该目录下的索引文档（按清单前缀匹配）。
+///
+/// 返回实际从索引中删除的文档数。清单为空（旧索引/未建索引）时返回 0，
+/// 只做配置层面的移除，不影响其他目录。
+#[tauri::command]
+pub fn remove_indexed_root(
+    path: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<u64, String> {
+    let target = path.trim();
+    if target.is_empty() {
+        return Err("目录不能为空".into());
+    }
+
+    let mut cfg = load_cfg(&state)?;
+    cfg.remove_root(target);
+    save_cfg(&state, &cfg)?;
+
+    let index_dir = state.index_dir().clone();
+    let mut removed = 0u64;
+    if let Ok(mut w) = Writer::open(&index_dir) {
+        let prefix = PathBuf::from(target);
+        let victims: Vec<String> = w
+            .manifest()
+            .docs
+            .keys()
+            .filter(|p| Path::new(p).starts_with(&prefix))
+            .cloned()
+            .collect();
+        if !victims.is_empty() {
+            for p in &victims {
+                if w.delete(p).is_ok() {
+                    removed += 1;
+                }
+            }
+            let _ = w.commit();
+        }
+    }
+    state.invalidate();
+    restart_scheduler(&app);
+    restart_watcher(&app);
+    Ok(removed)
 }
 
 /// 索引统计（dir_size 递归遍历可能 >10ms → async 线程池执行）
@@ -627,16 +686,27 @@ fn do_rebuild(app: &tauri::AppHandle, ctl: &RebuildControl) -> Result<(), String
     ctl.control.reset(); // 新一轮：清空取消 + 暂停
     let state = app.state::<AppState>();
 
-    // 1. 清空索引（写侧 Writer 的 delete_all + commit；读侧 reader commit 后自动 reload）
     let index_dir = state.index_dir().clone();
-    Writer::open(&index_dir)
-        .and_then(|mut w| w.clear())
-        .map_err(|e| e.to_string())?;
+
+    // 1. 决定本次是增量还是全量，必要时就地修复索引目录。
+    //    不再无条件 clear()：清空重建会让「改一个文件也要全部重算」。
+    let mode = prepare_index(&index_dir)?;
     state.invalidate();
 
-    // 2. 逐个根目录全量索引
+    // 2. 逐个根目录索引（增量模式下 size+mtime 未变的文件直接跳过）
     let cfg = load_cfg(&state)?;
     let rules = cfg.compile_rules(None).map_err(|e| e.to_string())?;
+
+    // 全量重建先开影子索引：所有根目录都写进同一个影子目录，
+    // 旧索引在这期间仍然可查，最后一次性替换（毫秒级）。
+    let shadow = if mode == stcore::indexer::IndexMode::Full {
+        Some(
+            stcore::index::reset_shadow(&index_dir)
+                .map_err(|e| format!("准备重建目录失败：{e}"))?,
+        )
+    } else {
+        None
+    };
 
     for root_str in &cfg.indexed_roots {
         if ctl.control.is_cancelled() {
@@ -646,24 +716,55 @@ fn do_rebuild(app: &tauri::AppHandle, ctl: &RebuildControl) -> Result<(), String
         if !root.exists() {
             continue;
         }
-        stcore::indexer::index_directory_controlled(
+        stcore::indexer::index_directory_mode_at(
             &root,
             &index_dir,
+            shadow.as_deref(),
             &rules,
             &cfg,
+            mode,
             Some(&ctl.control),
             |p| emit_progress(app, &p),
         )
         .map_err(|e| e.to_string())?;
     }
 
-    // 3. 释放锁，令后续搜索读到新段（reader 已自动 reload，此处清缓存兜底）
+    // 影子写完才替换主目录；被取消就留着，旧索引继续可用
+    if shadow.is_some() && !ctl.control.is_cancelled() {
+        stcore::index::promote_shadow(&index_dir)
+            .map_err(|e| format!("切换新索引失败：{e}"))?;
+    }
+
+    // 3. 释放缓存，令后续搜索读到新段（reader 已自动 reload，此处清缓存兜底）
     state.invalidate();
     // 取消语义：已写入部分照常 commit，但向上返回 Err，让前端 catch 展示"已取消"
     if ctl.control.is_cancelled() {
         return Err("已取消".into());
     }
     Ok(())
+}
+
+/// 决定本次重建用哪种模式，并在必要时就地修复索引目录。
+///
+/// - 能正常打开、且增量清单非空 → 增量（只处理变更文件）
+/// - 能正常打开、但清单为空（首次建立 / 从旧版本升级上来）→ 全量
+/// - 打不开（schema 升级、索引损坏）→ 清数据后全量。清空前保留
+///   `config.json` / `app.json` / `synonyms.json` / `*.db`，用户配置与搜索历史不丢。
+fn prepare_index(index_dir: &Path) -> Result<stcore::indexer::IndexMode, String> {
+    use stcore::indexer::IndexMode;
+
+    if stcore::index::Writer::open(index_dir).is_ok() {
+        let m = stcore::index::Manifest::load(index_dir);
+        return Ok(if m.is_empty() {
+            IndexMode::Full
+        } else {
+            IndexMode::Incremental
+        });
+    }
+    // 打开失败：多半是 schema 版本升级。这次注定要全量重建，先清干净。
+    eprintln!("索引无法打开，清空数据后全量重建（配置与历史保留）");
+    stcore::index::reset_index_data(index_dir).map_err(|e| format!("清理旧索引失败：{e}"))?;
+    Ok(IndexMode::Full)
 }
 
 /* -------------------------------- 命令层（薄封装） -------------------------------- */
@@ -707,7 +808,7 @@ pub fn set_index_paused(paused: bool) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::testutil::{write, TempDir};
-    use stcore::index::{IndexDoc, IndexManager};
+    use stcore::index::{IndexDoc, IndexManager, Writer};
 
     /// 造一个含 n 篇文档的真实 tantivy 索引，返回文档数
     fn seed_index(dir: &Path, n: usize) -> u64 {

@@ -2,7 +2,7 @@
  * 7.9 / B6：检测更新 —— 前端 invoke 封装
  * 通道未配置（tauri.conf.json 占位 endpoints）时后端返回可读 Err。
  */
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/tauri'
 
 export interface UpdateInfo {
   /** 是否有新版本 */

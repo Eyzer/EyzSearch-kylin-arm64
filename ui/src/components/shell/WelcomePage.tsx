@@ -5,6 +5,7 @@
  * 文案走 i18n t()（key 见 ui/src/i18n/zh-CN.ts welcome.*）。
  */
 import { useI18n } from '../../i18n'
+import { ABOUT } from '../../aboutText'
 import './shell.css'
 
 export interface WelcomePageProps {
@@ -47,9 +48,30 @@ export default function WelcomePage({ onOpenHomepage }: WelcomePageProps) {
       </section>
 
       <section className="welcome-section">
-        <h3>{t('welcome.about.title')}</h3>
-        <p>{t('welcome.about.body1')}</p>
-        <p>{t('welcome.about.body2')}</p>
+        <h3>{ABOUT.title}</h3>
+        <p>{ABOUT.intro}</p>
+
+        <h4 className="about-sub">{ABOUT.featureTitle}</h4>
+        <ul className="about-list">
+          {ABOUT.features.map((f) => (
+            <li key={f}>{f}</li>
+          ))}
+        </ul>
+
+        <dl className="about-kv">
+          <dt>{ABOUT.envTitle}</dt>
+          <dd>{ABOUT.env}</dd>
+          <dt>{ABOUT.techTitle}</dt>
+          <dd>{ABOUT.tech}</dd>
+          <dt>{ABOUT.dataTitle}</dt>
+          <dd>{ABOUT.data}</dd>
+          <dt>{ABOUT.creditTitle}</dt>
+          <dd>{ABOUT.credit}</dd>
+          <dt>{ABOUT.authorLabel}</dt>
+          <dd>{ABOUT.author}</dd>
+        </dl>
+
+        <p className="welcome-dim">{ABOUT.copyright}</p>
       </section>
 
       <div className="welcome-actions">

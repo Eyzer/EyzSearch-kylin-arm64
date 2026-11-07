@@ -1,4 +1,4 @@
-//! 右击搜索：在文件管理器**目录上/目录空白处右键** → “用 search-tool 搜索”
+//! 右击搜索：在文件管理器**目录上/目录空白处右键** → “用 EyzSearch 搜索”
 //! → 以该目录启动应用。启停开关对应“设置 → 右击目录搜索”。
 //!
 //! ## 平台实现
@@ -18,13 +18,13 @@ use crate::commands::shell::AppConfig;
 use crate::state::AppState;
 
 /// 菜单显示名
-const MENU_LABEL: &str = "用 search-tool 搜索";
+const MENU_LABEL: &str = "用 EyzSearch 搜索";
 /// Nautilus 脚本文件名
 #[cfg(unix)]
-const NAUTILUS_SCRIPT: &str = "search-tool-search";
+const NAUTILUS_SCRIPT: &str = "eyzsearch-search";
 /// nautilus-python 扩展文件名
 #[cfg(unix)]
-const NAUTILUS_PY_EXT: &str = "search-tool.py";
+const NAUTILUS_PY_EXT: &str = "eyzsearch.py";
 
 #[cfg(unix)]
 fn home() -> PathBuf {
@@ -89,7 +89,7 @@ fn install_unix(exe: &Path) -> Result<String, String> {
     let script_path = scripts.join(NAUTILUS_SCRIPT);
     let script = format!(
         "#!/bin/sh\n\
-         # search-tool 右击搜索（由应用写入；删除本文件即卸载）\n\
+         # EyzSearch 右击搜索（由应用写入；删除本文件即卸载）\n\
          IFS='\\n'\n\
          for p in $NAUTILUS_SCRIPT_SELECTED_FILE_PATHS; do\n\
          \x20 [ -d \"$p\" ] && exec \"{exe_s}\" --open-dir \"$p\"\n\
@@ -105,20 +105,20 @@ fn install_unix(exe: &Path) -> Result<String, String> {
     std::fs::create_dir_all(&py_dir).map_err(|e| format!("创建 {} 失败: {e}", py_dir.display()))?;
     let py_path = py_dir.join(NAUTILUS_PY_EXT);
     let py = format!(
-        r#"# search-tool 右击搜索扩展（由应用写入；删除本文件即卸载）
+        r#"# EyzSearch 右击搜索扩展（由应用写入；删除本文件即卸载）
 # 依赖：系统安装 nautilus-python + python3-gi（多数发行版仓库可装）
 import subprocess
 from urllib.parse import unquote
 
 from gi.repository import GObject, Nautilus
 
-SEARCH_TOOL = "{exe_s}"
+EYZSEARCH = "{exe_s}"
 MENU_LABEL = "{MENU_LABEL}"
 
 
 class SearchToolMenuProvider(GObject.GObject, Nautilus.MenuProvider):
     def _activate(self, _menu, path: str) -> None:
-        subprocess.Popen([SEARCH_TOOL, "--open-dir", path])
+        subprocess.Popen([EYZSEARCH, "--open-dir", path])
 
     def get_background_items(self, folder):
         path = unquote(folder.get_uri()[7:])
@@ -147,11 +147,11 @@ class SearchToolMenuProvider(GObject.GObject, Nautilus.MenuProvider):
     // ③ .desktop（Open With 关联目录）
     let apps = applications_dir();
     std::fs::create_dir_all(&apps).map_err(|e| format!("创建 {} 失败: {e}", apps.display()))?;
-    let desktop = apps.join("search-tool.desktop");
+    let desktop = apps.join("eyzsearch.desktop");
     let content = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
-         Name=search-tool\n\
+         Name=EyzSearch\n\
          Comment=本地全文搜索\n\
          Exec=\"{exe_s}\" --open-dir %f\n\
          MimeType=inode/directory;\n\
@@ -173,7 +173,7 @@ fn uninstall_unix() -> Result<String, String> {
     for p in [
         nautilus_py_dir().join(NAUTILUS_PY_EXT),
         nautilus_scripts_dir().join(NAUTILUS_SCRIPT),
-        applications_dir().join("search-tool.desktop"),
+        applications_dir().join("eyzsearch.desktop"),
     ] {
         if p.exists() {
             std::fs::remove_file(&p).map_err(|e| format!("删除 {} 失败: {e}", p.display()))?;
@@ -215,7 +215,7 @@ fn install_windows(exe: &Path) -> Result<String, String> {
         run_reg(&["add", key, "/ve", "/d", lbl, "/f"])?;
         run_reg(&["add", &format!("{key}\\command"), "/ve", "/d", &cmd, "/f"])?;
     }
-    Ok("已启用：资源管理器目录（含空白处）右键 → “用 search-tool 搜索”".to_string())
+    Ok("已启用：资源管理器目录（含空白处）右键 → “用 EyzSearch 搜索”".to_string())
 }
 
 #[cfg(windows)]
@@ -338,7 +338,7 @@ mod tests {
             "nautilus 脚本应写入"
         );
         assert!(
-            applications_dir().join("search-tool.desktop").is_file(),
+            applications_dir().join("eyzsearch.desktop").is_file(),
             ".desktop 应写入"
         );
         assert!(is_installed(), "安装后状态应为已安装");

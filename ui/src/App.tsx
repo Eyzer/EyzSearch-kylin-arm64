@@ -24,6 +24,7 @@ import { errMsg } from './util'
 import AppToolbar from './components/shell/AppToolbar'
 import MenuBar from './components/shell/MenuBar'
 import SettingsDialog from './components/shell/SettingsDialog'
+import AboutDialog from './components/shell/AboutDialog'
 import StatusBar from './components/shell/StatusBar'
 import ThemeProvider from './components/shell/ThemeProvider'
 import WelcomePage from './components/shell/WelcomePage'
@@ -79,6 +80,7 @@ export default function App() {
   const [indexState, setIndexState] = useState<IndexRunState>('idle')
   const [showIndexAdmin, setShowIndexAdmin] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showAbout, setShowAbout] = useState(false)
   const [showWelcome, setShowWelcome] = useState(true)
   const [showBookmarks, setShowBookmarks] = useState(false)
   const [navStack, setNavStack] = useState<Array<{ dir: string | null; fileType: string | null }>>([])
@@ -353,7 +355,7 @@ export default function App() {
           break
         case 'file.exit':
           void import('@tauri-apps/api/window')
-            .then((m) => m.getCurrentWindow().close())
+            .then((m) => m.appWindow.close())
             .catch(() => {})
           break
         case 'edit.copyPath':
@@ -405,8 +407,10 @@ export default function App() {
           setShowSettings(true)
           break
         case 'help.homepage':
+          void api.openExternal('https://github.com/Eyzer').catch(() => {})
+          break
         case 'help.about':
-          window.open('https://github.com/shadyrispy/everytxt', '_blank', 'noopener')
+          setShowAbout(true)
           break
       }
     },
@@ -473,8 +477,10 @@ export default function App() {
           break
         }
         case 'help.info':
+          setShowAbout(true)
+          break
         case 'help.homepage':
-          window.open('https://github.com/shadyrispy/everytxt', '_blank', 'noopener')
+          void api.openExternal('https://github.com/Eyzer').catch(() => {})
           break
         default:
           break
@@ -724,7 +730,7 @@ export default function App() {
       /* F1 帮助：打开项目主页。TODO：若 MenuBar 暴露 syntaxTick prop，可改为展开语法速查面板 */
       if (e.key === 'F1' && !e.shiftKey) {
         e.preventDefault()
-        window.open('https://github.com/shadyrispy/everytxt', '_blank', 'noopener')
+        void api.openExternal('https://github.com/Eyzer').catch(() => {})
         return
       }
       /* Escape 清除选择 */
@@ -829,7 +835,9 @@ export default function App() {
           </section>
 
           {showWelcome ? (
-            <WelcomePage onOpenHomepage={() => window.open('https://github.com/shadyrispy/everytxt', '_blank', 'noopener')} />
+            <WelcomePage
+              onOpenHomepage={() => void api.openExternal('https://github.com/Eyzer').catch(() => {})}
+            />
           ) : (
             <PreviewPane
               tabs={tabs}
@@ -870,6 +878,7 @@ export default function App() {
           }}
         />
         <BookmarkPanel open={showBookmarks} onClose={() => setShowBookmarks(false)} />
+        <AboutDialog open={showAbout} onClose={() => setShowAbout(false)} />
         <ExternalSearchListener
           onSearch={(q, drive, ext) => {
             setQuery(q)

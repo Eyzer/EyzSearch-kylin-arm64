@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 
 use fs_extra::dir::CopyOptions;
 use rust_xlsxwriter::{Format, Workbook};
-use tauri_plugin_dialog::DialogExt;
 
 use crate::commands::dto::{ExportRequest, FileOpResult};
 
@@ -25,6 +24,20 @@ use crate::commands::dto::{ExportRequest, FileOpResult};
 #[tauri::command]
 pub fn open_file(path: String) -> Result<(), String> {
     open::that(&path).map_err(|e| e.to_string())
+}
+
+/// 弹系统目录选择框，返回绝对路径；用户取消返回 `None`。
+///
+/// 索引管理里「添加目录 / 迁移索引存储」用它替代手输路径。
+#[tauri::command(async)]
+pub fn pick_directory(title: Option<String>, _app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let mut builder = tauri::api::dialog::blocking::FileDialogBuilder::new();
+    if let Some(t) = title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        builder = builder.set_title(t);
+    }
+    Ok(builder
+        .pick_folder()
+        .map(|p| p.to_string_lossy().to_string()))
 }
 
 /// 在系统文件管理器中定位该文件
@@ -241,16 +254,14 @@ pub fn transfer_files(
     paths: Vec<String>,
     dest: String,
     is_move: bool,
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
 ) -> Result<FileOpResult, String> {
     let dest: PathBuf = if dest.trim().is_empty() {
-        let picked = app
-            .dialog()
-            .file()
+        let picked = tauri::api::dialog::blocking::FileDialogBuilder::new()
             .set_title("选择目标目录")
-            .blocking_pick_folder();
+            .pick_folder();
         match picked {
-            Some(fp) => fp.into_path().map_err(|e| e.to_string())?,
+            Some(p) => p,
             None => return Err("已取消".into()),
         }
     } else {
@@ -263,16 +274,14 @@ pub fn transfer_files(
 ///
 /// `req.dest` 为空串时用 `tauri_plugin_dialog` 保存对话框取路径；用户取消 → `Err("已取消导出")`。
 #[tauri::command(async)]
-pub fn export_xlsx(req: ExportRequest, app: tauri::AppHandle) -> Result<String, String> {
+pub fn export_xlsx(req: ExportRequest, _app: tauri::AppHandle) -> Result<String, String> {
     let dest: PathBuf = if req.dest.trim().is_empty() {
-        let picked = app
-            .dialog()
-            .file()
+        let picked = tauri::api::dialog::blocking::FileDialogBuilder::new()
             .add_filter("Excel 工作簿", &["xlsx"])
             .set_file_name("search-results.xlsx")
-            .blocking_save_file();
+            .save_file();
         match picked {
-            Some(fp) => fp.into_path().map_err(|e| e.to_string())?,
+            Some(p) => p,
             None => return Err("已取消导出".into()),
         }
     } else {

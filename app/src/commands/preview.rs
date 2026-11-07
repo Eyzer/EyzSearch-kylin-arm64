@@ -12,6 +12,26 @@ use stcore::preview::{
 };
 use stcore::search::SearchMode;
 
+/// 需走提取层（而非当纯文本解码）的二进制文档扩展名。
+///
+/// 这些文件是 ZIP/OLE/PDF/图片等二进制容器，若直接按文本解码必然乱码；
+/// 必须复用索引链路的 `extract_path` 得到提取后的正文。
+/// 文本类（txt/md/json/代码…）与未知扩展名不在此列，保持原始字节 + 编码检测。
+const EXTRACT_EXTS: &[&str] = &[
+    // OOXML
+    "docx", "docm", "xlsx", "xlsm", "xlsb", "pptx", "pptm", "pps", "ppsx", "pot", "potx",
+    // 旧格式 / ODF / RTF
+    "doc", "dot", "xls", "xlt", "ppt", "odt", "ods", "odp", "rtf",
+    // WPS 原生
+    "wps", "wpt", "et", "ett", "dps", "dpt",
+    // PDF
+    "pdf",
+    // 电子书
+    "epub", "mobi", "azw", "azw3", "fb2", "lit", "kfx", "cbz",
+    // 图片（OCR）
+    "png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "gif",
+];
+
 /// 文档正文解析：普通文件走磁盘读+解码；压缩包内层条目（`包.zip#entry`）走索引 docstore
 ///
 /// 判定顺序：**先查磁盘存在性**——合法文件名可能含 `#`（如 `a#b.txt`），
@@ -25,6 +45,17 @@ fn load_text(path: &str, state: &State<'_, AppState>) -> Result<(String, Option<
             })
             .map(|t| (t, Some("UTF-8".to_string())))
             .map_err(|e| e.to_string());
+    }
+    // 二进制文档（Office/OOXML/旧格式/WPS/PDF/电子书/图片）必须走提取层：
+    // 直接读字节当文本解码会把 ZIP/OLE/PDF 二进制解成乱码。
+    let ext = std::path::Path::new(path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if EXTRACT_EXTS.contains(&ext.as_str()) {
+        let r = stcore::extract::extract_path(std::path::Path::new(path))
+            .map_err(|e| e.to_string())?;
+        return Ok((r.text, Some("UTF-8".to_string())));
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     // sjz 标签容器：与索引链路同口径，预览前先解密

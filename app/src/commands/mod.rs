@@ -22,8 +22,9 @@ pub mod updater;
 
 /// 汇总全部 invoke 命令（新增命令在此登记）
 ///
-/// 固定为 Wry 运行时（桌面端唯一实现），使命令可接收 `tauri::AppHandle`。
-pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+/// Tauri 1.8 的 `invoke_handler` 要求 `Fn(Invoke<R>)`（返回 `()`），
+/// 与 Tauri 2 的 `-> bool` 不同。
+pub fn handler() -> impl Fn(tauri::Invoke<tauri::Wry>) + Send + Sync + 'static {
     tauri::generate_handler![
         // ---- 子项 1：搜索 ----
         search::search,
@@ -42,6 +43,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         files::delete_permanently,
         files::transfer_files,
         files::export_xlsx,
+        files::pick_directory,
         // ---- 子项 3：索引管理 ----
         index_admin::list_file_types,
         index_admin::add_file_type,
@@ -51,6 +53,9 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         index_admin::set_dir_rule,
         index_admin::remove_dir_rule,
         index_admin::list_indexed_roots,
+        index_admin::remove_indexed_root,
+        index_admin::get_index_types,
+        index_admin::set_index_types,
         index_admin::get_index_stats,
         index_admin::get_storage_info,
         index_admin::migrate_storage,
@@ -78,6 +83,9 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         shell::set_app_config,
         shell::set_theme,
         shell::set_autostart,
+        shell::ocr_status,
+        shell::open_external,
+        shell::app_info,
         shell::apply_global_hotkeys,
         shell::show_main_window,
         shell::hide_main_window,
